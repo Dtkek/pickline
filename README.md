@@ -9,9 +9,13 @@
 через Game State Integration и показывать сборку по про-матчам. В игру не
 вмешивается: не читает память, ничего не внедряет, не нажимает за вас.
 
-**Windows, без установки:** скачать
+**Windows:** скачать
+[pickline-setup.exe](https://github.com/Dtkek/pickline/releases/download/latest/pickline-setup.exe)
+и установить — ярлык в «Пуске» и на рабочем столе, без предупреждений
+при запуске. Или без установки:
 [pickline.exe](https://github.com/Dtkek/pickline/releases/download/latest/pickline.exe)
-и запустить. Один файл, Python и распаковка не нужны.
+— один файл, но Windows будет переспрашивать при каждом запуске, пока не
+снять метку «Разблокировать» в свойствах файла. Python не нужен.
 
 **Из исходников (macOS, Linux, Windows):** `python3 app/server.py` —
 стандартной библиотеки Python 3 достаточно; пакеты нужны только для чтения

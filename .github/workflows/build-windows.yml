@@ -92,14 +92,49 @@ jobs:
           if (-not (Test-Path $data)) { throw "кэш не создан в $data - данные пишутся не туда" }
           Write-Host "данные в ${data}: $((Get-ChildItem $data -Recurse -File | Measure-Object).Count) файлов"
 
+      - name: Установщик (Inno Setup)
+        # Установленные файлы не несут метку «из интернета» - никаких
+        # предупреждений при запуске; SmartScreen только на сам установщик.
+        # Версия - из VERSION в server.py; VersionInfoVersion требует x.x.x.x.
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          $ver = (Select-String -Path app\server.py -Pattern 'VERSION = "([^"]+)"').Matches[0].Groups[1].Value
+          $fv = ($ver -replace '-', '.') -replace '\.0+(\d)', '.$1'
+          & $iscc "/DAppVersion=$ver" "/DFileVersion=$fv" installer\pickline.iss | Select-Object -Last 3
+          if ($LASTEXITCODE -ne 0) { throw "ISCC завершился с кодом $LASTEXITCODE" }
+          Get-Item dist\pickline-setup.exe | Select-Object Name, Length
+
+      - name: Проверка установщика
+        # тихая установка в профиль, установленный exe должен запуститься
+        # и ответить по HTTP (--no-browser: окно уже проверено выше)
+        shell: pwsh
+        run: |
+          Start-Process -FilePath dist\pickline-setup.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
+          $exe = Join-Path $env:LOCALAPPDATA "Programs\Pickline\pickline.exe"
+          if (-not (Test-Path $exe)) { throw "после установки нет $exe" }
+          $p = Start-Process -FilePath $exe -ArgumentList "--no-browser","--port","8792" -PassThru -NoNewWindow
+          Start-Sleep -Seconds 20
+          try {
+            if ($p.HasExited) { throw "установленный exe завершился с кодом $($p.ExitCode)" }
+            $r = Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8792/api/heroes"
+            if ($r.StatusCode -ne 200) { throw "HTTP $($r.StatusCode)" }
+            Write-Host "установленный exe отвечает"
+          } finally {
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          }
+
       # артефакт - запасная копия для запусков не с main; релиз ниже
-      # прикладывает exe сам. Хранилище артефактов иногда отвечает 403
+      # прикладывает файлы сам. Хранилище артефактов иногда отвечает 403
       # на финализацию - из-за этого один раз падала вся сборка
       - uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
           name: pickline-windows
-          path: dist/pickline.exe
+          path: |
+            dist/pickline-setup.exe
+            dist/pickline.exe
 
       # релиз и на push, и на ручной запуск: через dispatch сборку
       # запускает обновление снимка STRATZ (update-snapshots.yml)
@@ -117,6 +152,9 @@ jobs:
           name: Последняя сборка
           body: |
             Автоматическая сборка из main (${{ github.sha }}).
-            Один файл: скачать `pickline.exe` и запустить - Python и распаковка не нужны.
-            Данные приложения (кэш, портреты, настройки) - в `%LOCALAPPDATA%\Pickline`, лог - рядом с exe.
-          files: dist/pickline.exe
+            **`pickline-setup.exe`** - установщик: ярлыки, без предупреждений при запуске, удаление через «Программы». Рекомендуется.
+            `pickline.exe` - то же приложение одним файлом без установки (Windows будет спрашивать при каждом запуске, пока не снять метку «Разблокировать» в свойствах файла).
+            Python не нужен. Данные приложения (кэш, портреты, настройки) - в `%LOCALAPPDATA%\Pickline`, лог - рядом с exe.
+          files: |
+            dist/pickline-setup.exe
+            dist/pickline.exe
