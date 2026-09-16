@@ -144,7 +144,9 @@ def get_json(url, ttl=3600, timeout=45, stale_ok=True):
 
     Если сеть недоступна, а в кэше есть просроченная копия, возвращается она
     (stale_ok): для Pickline вчерашние винрейты лучше, чем ошибка.
-    На 429/5xx - одна повторная попытка через пару секунд.
+    Одна повторная попытка через пару секунд - и на 429/5xx, и на обрыв
+    соединения (у пользователя рвалось TLS-рукопожатие с OpenDota на
+    секунды - с повтором это не ошибка, а задержка).
     """
     global _use_curl
     cached = _read_cache(url, ttl)
@@ -167,9 +169,11 @@ def get_json(url, ttl=3600, timeout=45, stale_ok=True):
                 break
             except Exception as e:  # noqa: BLE001 — сбой соединения: пробуем запасной путь
                 error = e
-        if not (isinstance(error, HttpStatusError) and error.code in RETRY_CODES):
+        # HTTP-ошибка не из списка повторяемых (404, 400) - повторять незачем
+        if isinstance(error, HttpStatusError) and error.code not in RETRY_CODES:
             break
-        time.sleep(2.5)
+        if attempt == 0:
+            time.sleep(2.5)
 
     if stale_ok:
         stale = _read_cache(url, ttl=None)
@@ -178,12 +182,32 @@ def get_json(url, ttl=3600, timeout=45, stale_ok=True):
             # «Про-матчи» сутки показывала вчерашний список, и по ней было
             # не понять, что OpenDota не отвечает. Причину помним и отдаём
             # через status(), в лог - только при смене текста ошибки.
-            text = str(error)[:200]
+            text = describe_error(error)
             if _last_error.get(url) != text:
-                sys.stderr.write(f"  сеть: {text}; показана копия из кэша для {url}\n")
+                sys.stderr.write(f"  сеть: {text}; показана копия из кэша для {short_url(url)}\n")
             _last_error[url] = text
             return stale
-    raise RuntimeError(f"не удалось получить {url}: {error}")
+    raise RuntimeError(f"нет связи с {short_url(url)}: {describe_error(error)}")
+
+
+def short_url(url):
+    """Адрес без параметров: у /explorer в них SQL на два экрана."""
+    return url.split("?", 1)[0]
+
+
+def describe_error(error):
+    """Человеческое описание сетевой ошибки вместо кода curl."""
+    text = str(error)
+    low = text.lower()
+    if "schannel" in low or "ssl/tls" in low or "handshake" in low or "ssl:" in low:
+        return "SSL/TLS-соединение не установилось (обрыв сети или VPN)"
+    if "timed out" in low or "timeout" in low:
+        return "сервер не ответил вовремя (медленный канал)"
+    if "could not resolve" in low or "getaddrinfo" in low or "name or service" in low:
+        return "не удалось найти адрес сервера (нет DNS или сети)"
+    if "connection refused" in low or "connection reset" in low or "remotedisconnected" in low:
+        return "соединение оборвано"
+    return text[:200]
 
 
 def get_json_fast(url, ttl=3600, max_age=7 * 24 * 3600):
