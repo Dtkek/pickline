@@ -14,6 +14,7 @@
     <button class="tab active" data-view="draft">Драфт</button>
     <button class="tab" data-view="meta">Мета</button>
     <button class="tab" data-view="tournaments">Турниры</button>
+    <button class="tab" data-view="wards">Варды</button>
     <button class="tab" data-view="pro">Про-матчи</button>
   </nav>
   <div class="spacer"></div>
@@ -260,6 +261,61 @@
       <div id="tour-summary" class="dim" style="margin-bottom:8px"></div>
       <div class="dim" style="margin-bottom:8px">Клик по герою — его сборка и прокачка по этим же турнирам.</div>
       <div id="tour-out" class="loading">Загрузка…</div>
+    </div>
+  </section>
+
+  <!-- ===================== ВАРДЫ ===================== -->
+  <section class="view" id="view-wards">
+    <div class="card">
+      <h2>Где ставят варды в турнирных матчах</h2>
+      <div class="controls">
+        <div><label>Тип</label>
+          <select id="ward-kind">
+            <option value="obs" selected>Обзорные (Observer)</option>
+            <option value="sen">Стражи (Sentry)</option>
+          </select>
+        </div>
+        <div><label>Сторона</label>
+          <select id="ward-side">
+            <option value="radiant" selected>Radiant (Свет)</option>
+            <option value="dire">Dire (Тьма)</option>
+            <option value="both">обе</option>
+          </select>
+        </div>
+        <div><label>Минуты</label>
+          <select id="ward-window">
+            <option value="early" selected>до рога – 5</option>
+            <option value="lane">5 – 10</option>
+            <option value="mid">10 – 20</option>
+            <option value="late">20 – 35</option>
+            <option value="end">35+</option>
+          </select>
+        </div>
+        <div><label>Герой</label><select id="ward-hero"><option value="">все</option></select></div>
+        <div><label>Период</label>
+          <select id="ward-months">
+            <option value="1">1 месяц</option>
+            <option value="3" selected>3 месяца</option>
+          </select>
+        </div>
+        <div><label>Уровень</label>
+          <select id="ward-tier">
+            <option value="top" selected>Premium + Professional</option>
+            <option value="premium">Только Premium</option>
+            <option value="all">Все турниры</option>
+          </select>
+        </div>
+        <button type="button" class="tab" id="ward-refresh" title="Пересчитать по базе OpenDota сейчас">Обновить</button>
+      </div>
+      <div class="dim" style="margin:6px 0 10px">
+        Тепловая карта по логам вардов из разобранных матчей OpenDota (реплеи не нужны).
+        Ярче — чаще; номера — самые частые точки, список справа. Клик по точке в списке подсвечивает её на карте.
+      </div>
+      <div id="ward-summary" class="dim" style="margin-bottom:8px"></div>
+      <div class="row">
+        <div class="ward-map-box"><canvas id="ward-map" width="720" height="720"></canvas></div>
+        <div class="col" style="flex: 1 1 300px"><div id="ward-out" class="loading">Загрузка…</div></div>
+      </div>
     </div>
   </section>
 

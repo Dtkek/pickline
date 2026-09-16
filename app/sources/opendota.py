@@ -464,6 +464,45 @@ class OpenDotaSource(HeroSource):
         """, ttl=TTL_TOURNAMENT).get("rows") or []
         return purchases, final
 
+    # --- варды ------------------------------------------------------------
+    def ward_cells(self, months=3, tier="top", kind="obs", side="radiant",
+                   hero_id=None, t_from=-120, t_to=600):
+        """Где ставят варды в турнирных матчах: клетки карты с числом вардов.
+
+        Логи вардов у OpenDota есть у каждого разобранного матча
+        (obs_log / sen_log: время в секундах от рога, x и y в клетках
+        карты 64..192). Реплеи для этого не нужны. Агрегация в базе:
+        клетка (округлённые x, y) -> сколько вардов и в скольких матчах.
+        side - чьи варды: radiant / dire / both. Возвращает (строки,
+        всего матчей за период).
+        """
+        col = "sen_log" if kind == "sen" else "obs_log"
+        tiers = self.TIERS.get(tier, self.TIERS["top"])
+        tier_sql = ", ".join(f"'{t}'" for t in tiers)
+        bound = self.period_bound(months)
+        side_sql = {"radiant": "and (pm.player_slot < 128)",
+                    "dire": "and (pm.player_slot >= 128)"}.get(side, "")
+        hero_sql = f"and pm.hero_id = {int(hero_id)}" if hero_id else ""
+        rows = _explorer(f"""
+            with pro as (
+              select m.match_id from matches m join leagues l on l.leagueid = m.leagueid
+              where {self._period_sql(months)} and l.tier in ({tier_sql})
+            ),
+            w as (
+              select pm.match_id, (e->>'time')::int as t,
+                     (e->>'x')::float as x, (e->>'y')::float as y
+              from player_matches pm join pro on pro.match_id = pm.match_id, unnest(pm.{col}) e
+              where pm.match_id >= {bound} and pm.{col} is not null {side_sql} {hero_sql}
+            )
+            select round(x)::int as cx, round(y)::int as cy, count(*) as n,
+                   count(distinct match_id) as matches,
+                   (select count(*) from pro) as total_matches
+            from w where t >= {int(t_from)} and t < {int(t_to)}
+            group by cx, cy order by n desc limit 600
+        """, ttl=TTL_TOURNAMENT).get("rows") or []
+        total = int(rows[0]["total_matches"]) if rows else 0
+        return rows, total
+
     # --- аккаунт игрока ---------------------------------------------------
     # Данные публичные при включённой в Steam настройке «Открытая история
     # матчей»; без неё OpenDota о игроке ничего не знает.

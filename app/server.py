@@ -36,6 +36,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 import gsi  # noqa: E402
 import net  # noqa: E402
+import paths  # noqa: E402
 import scoring  # noqa: E402
 import vision  # noqa: E402
 import window  # noqa: E402
@@ -122,7 +123,7 @@ CDN = "https://cdn.cloudflare.steamstatic.com"
 
 # Версия показывается в консоли и в шапке страницы: когда что-то идёт не так,
 # первым делом нужно понять, какой код на самом деле запущен.
-VERSION = "2026-09-16.6"
+VERSION = "2026-09-16.7"
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -131,6 +132,7 @@ MIME = {
     ".svg": "image/svg+xml",
     ".png": "image/png",
     ".ico": "image/x-icon",
+    ".webp": "image/webp",
 }
 
 
@@ -956,6 +958,82 @@ def tournament_leagues_fast(source, months=3, force=False):
             "note": _fast_note(st, what="список турниров", empty=not stale)}
 
 
+# --- варды ---------------------------------------------------------------
+# Тепловая карта вардов по турнирным матчам. Запрос к базе - секунды, поэтому
+# тот же порядок, что у сборки: памятка → фон → pending. Снимка нет: окон
+# времени, сторон и героев слишком много, а первый ответ в любом случае
+# приходит из памятки после первого же показа.
+
+# картинка карты - у OpenDota; кэшируется в папке данных один раз
+MAP_URL = "https://www.opendota.com/assets/images/dota2/map/detailed_740.webp"
+MAP_FILE = os.path.join(paths.DATA_DIR, "assets", "map_740.webp")
+# окна времени, минуты от рога (варды до рога - отрицательное время)
+WARD_WINDOWS = {"early": (-3, 5), "lane": (5, 10), "mid": (10, 20), "late": (20, 35), "end": (35, 180)}
+
+
+def ward_spots(rows, radius=2, limit=12):
+    """Скучивает клетки в «точки»: соседние клетки в радиусе - один вард-спот.
+
+    Клетка - округлённые координаты, а один и тот же спот в разных
+    матчах отличается на клетку-другую. Жадно: самая частая клетка
+    собирает соседей, потом следующая из оставшихся.
+    """
+    cells = [(int(r["cx"]), int(r["cy"]), int(r["n"]), int(r["matches"])) for r in rows]
+    cells.sort(key=lambda c: -c[2])
+    taken = set()
+    spots = []
+    for cx, cy, _n, _m in cells:
+        if (cx, cy) in taken:
+            continue
+        group = [c for c in cells if (c[0], c[1]) not in taken
+                 and abs(c[0] - cx) <= radius and abs(c[1] - cy) <= radius]
+        for c in group:
+            taken.add((c[0], c[1]))
+        n = sum(c[2] for c in group)
+        spots.append({
+            "x": round(sum(c[0] * c[2] for c in group) / n, 1),
+            "y": round(sum(c[1] * c[2] for c in group) / n, 1),
+            "n": n,
+            # матчи по клеткам пересекаются; берём максимум как нижнюю оценку
+            "matches": max(c[3] for c in group),
+        })
+    spots.sort(key=lambda s: -s["n"])
+    return spots[:limit]
+
+
+def wards_table(source, months, tier, kind, side, hero_id, window, force=False):
+    t0, t1 = WARD_WINDOWS.get(window, WARD_WINDOWS["early"])
+    key = f"wards/{int(months)}/{tier}/{kind}/{side}/{int(hero_id or 0)}/{window}"
+
+    def compute():
+        rows, total = source.ward_cells(months, tier, kind, side, hero_id, t0 * 60, t1 * 60)
+        return {"rows": rows, "total": total}
+
+    ready, stale, st = _memo_first(key, compute, force)
+    data = ready if ready is not None else stale
+    out = {"kind": kind, "side": side, "hero_id": hero_id, "window": window,
+           "from": t0, "to": t1, "months": months, "tier": tier,
+           "pending": bool(st and st["computing"]),
+           "note": None if ready is not None else _fast_note(st, what="варды", empty=data is None)}
+    if data is None:
+        out.update(total_matches=0, wards=0, cells=[], spots=[])
+        return out
+    rows = data["rows"]
+    out["total_matches"] = data["total"]
+    out["wards"] = sum(int(r["n"]) for r in rows)
+    out["cells"] = [{"x": int(r["cx"]), "y": int(r["cy"]), "n": int(r["n"])} for r in rows]
+    out["spots"] = ward_spots(rows)
+    return out
+
+
+def map_image():
+    """Путь к картинке карты; качается один раз, при неудаче - None."""
+    if os.path.exists(MAP_FILE) and os.path.getsize(MAP_FILE) > 0:
+        return MAP_FILE
+    ok, _why = net.download(MAP_URL, MAP_FILE, timeout=30)
+    return MAP_FILE if ok else None
+
+
 def pro_match_detail(source, match_id):
     """Драфт матча + кто выигрывал по матчапам ещё до начала игры."""
     # лёгкий путь через базу; полный JSON матча - только если база не отдала
@@ -1188,6 +1266,21 @@ class Handler(BaseHTTPRequestHandler):
                 tier = (q.get("tier") or ["top"])[0]
                 force = (q.get("force") or ["0"])[0] == "1"
                 return self._json(hero_build_fast(src, int(hero), months, enemies, tier, force))
+            if url.path == "/api/wards":
+                months = int((q.get("months") or ["3"])[0])
+                tier = (q.get("tier") or ["top"])[0]
+                kind = "sen" if (q.get("kind") or ["obs"])[0] == "sen" else "obs"
+                side = (q.get("side") or ["radiant"])[0]
+                hero = (q.get("hero") or [""])[0]
+                window = (q.get("window") or ["early"])[0]
+                force = (q.get("force") or ["0"])[0] == "1"
+                return self._json(wards_table(src, months, tier, kind, side,
+                                              int(hero) if hero.strip() else None, window, force))
+            if url.path == "/api/map":
+                path = map_image()
+                if not path:
+                    return self._json({"error": "карта не скачалась"}, 404)
+                return self._file(path)
             if url.path == "/api/tournaments/leagues":
                 months = int((q.get("months") or ["3"])[0])
                 return self._json(tournament_leagues_fast(src, months))

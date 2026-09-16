@@ -130,6 +130,7 @@ document.querySelectorAll('.tabs .tab[data-view]').forEach((tab) => {
     $('#view-' + tab.dataset.view).classList.add('active');
     if (tab.dataset.view === 'meta') loadMeta();
     if (tab.dataset.view === 'tournaments') loadTournaments();
+    if (tab.dataset.view === 'wards' && !ward.data) loadWards(false);
     if (tab.dataset.view === 'pro') loadProList();
   });
 });
@@ -179,6 +180,7 @@ async function boot() {
     renderHeroGrid();
     renderSlots();
     fillMyHeroSelect();
+    fillWardHeroSelect();
     visionBoot();
     const savedAccount = loadAccount();
     if (savedAccount) {
@@ -1551,6 +1553,173 @@ function renderTournaments() {
   });
   table.appendChild(tb);
   out.appendChild(table);
+}
+
+
+// ---------------------------------------------------------------- варды
+// Тепловая карта вардов по турнирным матчам: клетки карты (64..192 по
+// обеим осям, как в логах OpenDota) рисуются поверх картинки карты.
+// Картинка идёт через сервер (/api/map, кэш); если не скачалась -
+// схема: реки, линии, базы. Данные - как у турниров: памятка или
+// «считается», страница дозапрашивает.
+const ward = { data: null, token: 0, active: -1, img: null, imgFailed: false };
+const MAP_MIN = 64;
+const MAP_SIZE = 128;
+
+['#ward-kind', '#ward-side', '#ward-window', '#ward-hero', '#ward-months', '#ward-tier'].forEach((sel) =>
+  $(sel).addEventListener('change', () => loadWards(false)));
+$('#ward-refresh').addEventListener('click', () => loadWards(true));
+
+function fillWardHeroSelect() {
+  const sel = $('#ward-hero');
+  const keep = sel.value;
+  sel.innerHTML = '<option value="">все</option>';
+  state.heroes.forEach((h) => {
+    const o = document.createElement('option');
+    o.value = h.id;
+    o.textContent = h.name;
+    sel.appendChild(o);
+  });
+  if (keep) sel.value = keep;
+}
+
+function loadMapImage() {
+  if (ward.img || ward.imgFailed) return;
+  const img = new Image();
+  img.onload = () => { ward.img = img; drawWards(); };
+  img.onerror = () => { ward.imgFailed = true; drawWards(); };
+  img.src = '/api/map';
+}
+
+async function loadWards(recompute, quiet) {
+  const out = $('#ward-out');
+  if (!quiet) { out.className = 'loading'; out.textContent = 'Загрузка…'; }
+  loadMapImage();
+  const token = ++ward.token;
+  try {
+    const q = new URLSearchParams({
+      kind: $('#ward-kind').value, side: $('#ward-side').value, window: $('#ward-window').value,
+      hero: $('#ward-hero').value, months: $('#ward-months').value, tier: $('#ward-tier').value,
+    });
+    if (recompute) q.set('force', '1');
+    const data = await api('/api/wards?' + q);
+    if (token !== ward.token) return;
+    ward.data = data;
+    ward.active = -1;
+    out.className = '';
+    renderWards(out, data);
+    drawWards();
+    if (data.pending) pollLater(() => token === ward.token && loadWards(false, true), 'wards');
+    else pollDone('wards');
+  } catch (e) {
+    if (token === ward.token) { out.className = ''; showError(out, e); }
+  }
+}
+
+function renderWards(out, data) {
+  const kindName = data.kind === 'sen' ? 'стражей' : 'обзорных вардов';
+  const sideName = { radiant: 'Radiant', dire: 'Dire', both: 'обеих сторон' }[data.side] || data.side;
+  const hero = data.hero_id ? (state.byId.get(data.hero_id) || {}).name : null;
+  const per = data.total_matches ? (data.wards / data.total_matches).toFixed(1) : '0';
+  $('#ward-summary').textContent = data.total_matches
+    ? `${data.wards} ${kindName} ${sideName}${hero ? ` (${hero})` : ''} в ${data.total_matches} матчах, ` +
+      `минуты ${data.from < 0 ? 'до рога' : data.from}–${data.to >= 180 ? 'конец' : data.to}: ` +
+      `в среднем ${per} за матч.`
+    : '';
+  out.innerHTML = '';
+  if (data.note) out.appendChild(el('div', data.pending || !/не отвечает/.test(data.note) ? 'dim' : 'error', data.note));
+  if (!data.spots.length) {
+    out.appendChild(el('div', 'empty-hint', data.pending ? 'Считаю по базе турнирных матчей…' : 'Вардов за период нет.'));
+    return;
+  }
+  const max = data.spots[0].n || 1;
+  data.spots.forEach((s, i) => {
+    const row = el('div', 'ward-spot');
+    row.appendChild(el('span', 'num', String(i + 1)));
+    const txt = el('div');
+    txt.style.minWidth = '120px';
+    txt.appendChild(el('div', '', `${s.n} шт. · ${data.total_matches ? Math.round(s.matches / data.total_matches * 100) : 0}% матчей`));
+    txt.appendChild(el('div', 'dim', `клетка ${s.x}, ${s.y}`));
+    row.appendChild(txt);
+    const bar = el('div', 'bar');
+    const fill = el('i');
+    fill.style.width = Math.round(s.n / max * 100) + '%';
+    bar.appendChild(fill);
+    row.appendChild(bar);
+    row.addEventListener('click', () => {
+      ward.active = ward.active === i ? -1 : i;
+      out.querySelectorAll('.ward-spot').forEach((r, j) => r.classList.toggle('active', j === ward.active));
+      drawWards();
+    });
+    out.appendChild(row);
+  });
+}
+
+// координаты клеток -> пиксели холста; ось y у игры вверх, у холста вниз
+function wardXY(x, y, size) {
+  return [(x - MAP_MIN) / MAP_SIZE * size, (1 - (y - MAP_MIN) / MAP_SIZE) * size];
+}
+
+function drawMapSchematic(ctx, size) {
+  ctx.fillStyle = '#12351a';
+  ctx.fillRect(0, 0, size, size);
+  // река - диагональ из левого верхнего угла в правый нижний
+  ctx.strokeStyle = '#1f4f6b';
+  ctx.lineWidth = size * 0.06;
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(size, size); ctx.stroke();
+  // линии: верх, низ и мид
+  ctx.strokeStyle = 'rgba(200,180,120,.35)';
+  ctx.lineWidth = size * 0.02;
+  const m = size * 0.12;
+  ctx.beginPath(); ctx.moveTo(m, size - m); ctx.lineTo(m, m); ctx.lineTo(size - m, m); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(m, size - m); ctx.lineTo(size - m, size - m); ctx.lineTo(size - m, m); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(m, size - m); ctx.lineTo(size - m, m); ctx.stroke();
+  // базы
+  ctx.fillStyle = 'rgba(63,185,80,.35)';
+  ctx.beginPath(); ctx.arc(m * 0.7, size - m * 0.7, size * 0.09, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(226,84,74,.35)';
+  ctx.beginPath(); ctx.arc(size - m * 0.7, m * 0.7, size * 0.09, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.5)';
+  ctx.font = `${Math.round(size * 0.022)}px sans-serif`;
+  ctx.fillText('схема: картинка карты не скачалась', size * 0.02, size * 0.98);
+}
+
+function drawWards() {
+  const canvas = $('#ward-map');
+  const ctx = canvas.getContext('2d');
+  const size = canvas.width;
+  ctx.clearRect(0, 0, size, size);
+  if (ward.img) ctx.drawImage(ward.img, 0, 0, size, size);
+  else drawMapSchematic(ctx, size);
+  const data = ward.data;
+  if (!data || !data.cells.length) return;
+  const max = data.cells[0].n || 1;
+  const color = data.kind === 'sen' ? '90,160,255' : '255,200,40';
+  // тепло: круг с прозрачностью по частоте; радиус - две клетки
+  const r = size / MAP_SIZE * 2.2;
+  data.cells.forEach((c) => {
+    const [px, py] = wardXY(c.x, c.y, size);
+    const a = 0.15 + 0.7 * Math.sqrt(c.n / max);
+    const g = ctx.createRadialGradient(px, py, 0, px, py, r);
+    g.addColorStop(0, `rgba(${color},${a})`);
+    g.addColorStop(1, `rgba(${color},0)`);
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+  });
+  // номера точек
+  data.spots.forEach((s, i) => {
+    const [px, py] = wardXY(s.x, s.y, size);
+    const active = i === ward.active;
+    const rr = active ? size * 0.024 : size * 0.016;
+    ctx.beginPath(); ctx.arc(px, py, rr, 0, Math.PI * 2);
+    ctx.fillStyle = active ? '#fff' : 'rgba(232,122,33,.95)';
+    ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = active ? '#e87a21' : 'rgba(0,0,0,.6)'; ctx.stroke();
+    ctx.fillStyle = active ? '#e87a21' : '#fff';
+    ctx.font = `bold ${Math.round(rr * 1.2)}px sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(String(i + 1), px, py + 1);
+  });
 }
 
 // ---------------------------------------------------------------- про-матчи
