@@ -106,6 +106,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "ISCC завершился с кодом $LASTEXITCODE" }
           Get-Item dist\pickline-setup.exe | Select-Object Name, Length
 
+      - name: Файл версии для проверки обновлений
+        # приложение при запуске сравнивает свою VERSION с этим файлом в релизе
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path app\server.py -Pattern 'VERSION = "([^"]+)"').Matches[0].Groups[1].Value
+          Set-Content -Path dist\version.txt -Value $ver -NoNewline -Encoding ascii
+          Get-Content dist\version.txt
+
       - name: Проверка установщика
         # тихая установка в профиль, установленный exe должен запуститься
         # и ответить по HTTP (--no-browser: окно уже проверено выше)
@@ -158,3 +166,4 @@ jobs:
           files: |
             dist/pickline-setup.exe
             dist/pickline.exe
+            dist/version.txt

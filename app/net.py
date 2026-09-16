@@ -210,6 +210,25 @@ def describe_error(error):
     return text[:200]
 
 
+def get_text(url, timeout=15):
+    """Небольшой текстовый файл по url без кэша (например, версия в релизе).
+
+    Тот же порядок, что у get_json: urllib, при сбое - curl.
+    """
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_context()) as r:
+            return r.read().decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001 - пробуем curl
+        pass
+    out = subprocess.run(["curl", "-sSL", "-f", "--max-time", str(timeout),
+                          "-H", f"User-Agent: {UA}", url],
+                         capture_output=True, text=True, **SUBPROCESS_FLAGS)
+    if out.returncode != 0:
+        raise RuntimeError(f"curl вернул код {out.returncode}: {out.stderr.strip()[:160]}")
+    return out.stdout
+
+
 def get_json_fast(url, ttl=3600, max_age=7 * 24 * 3600):
     """То же, но никогда не ждёт сеть.
 

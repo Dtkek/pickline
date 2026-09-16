@@ -1702,4 +1702,23 @@ function heroRow(items, isBan) {
   return row;
 }
 
+// ---------------------------------------------------------------- обновления
+// сервер проверяет version.txt в релизе в фоне при старте; спрашиваем
+// через несколько секунд и ещё раз позже, если сеть не успела
+async function checkUpdate(attempt) {
+  try {
+    const u = await api('/api/update');
+    if (u.available) {
+      const link = $('#update-link');
+      link.textContent = `Доступна версия ${u.latest} — скачать`;
+      link.href = u.url;
+      link.title = `У вас ${u.current}`;
+      link.hidden = false;
+      return;
+    }
+    if (!u.checked && attempt < 3) setTimeout(() => checkUpdate(attempt + 1), 15000);
+  } catch (e) { /* без сети - без обновлений, это не ошибка */ }
+}
+setTimeout(() => checkUpdate(0), 6000);
+
 boot();

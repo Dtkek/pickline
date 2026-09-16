@@ -122,7 +122,7 @@ CDN = "https://cdn.cloudflare.steamstatic.com"
 
 # Версия показывается в консоли и в шапке страницы: когда что-то идёт не так,
 # первым делом нужно понять, какой код на самом деле запущен.
-VERSION = "2026-09-16.2"
+VERSION = "2026-09-16.3"
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -1059,6 +1059,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(pro_match_detail(src, int(mid)))
             if url.path == "/api/cache/clear":
                 return self._json({"removed": net.clear_cache()})
+            if url.path == "/api/update":
+                return self._json(update_status())
 
             if url.path == "/api/vision/status":
                 return self._json(vision_status())
@@ -1337,6 +1339,38 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": str(e)}, 500)
 
 
+# --- проверка обновлений -----------------------------------------------------
+# CI кладёт в релиз latest файл version.txt с VERSION собранного exe.
+# Проверка идёт в фоне при старте; страница спрашивает /api/update.
+RELEASE_PAGE = "https://github.com/Dtkek/pickline/releases/tag/latest"
+VERSION_URL = "https://github.com/Dtkek/pickline/releases/download/latest/version.txt"
+_update = {"checked": False, "latest": None, "available": False, "error": None}
+
+
+def _version_key(v):
+    """«2026-09-16.2» -> (2026, 9, 16, 2) для сравнения."""
+    import re
+    return tuple(int(x) for x in re.findall(r"\d+", v or ""))
+
+
+def check_update_in_background():
+    def worker():
+        try:
+            latest = net.get_text(VERSION_URL).strip()
+            _update.update(latest=latest, error=None,
+                           available=_version_key(latest) > _version_key(VERSION))
+        except Exception as e:  # noqa: BLE001 - без сети просто не узнаем
+            _update.update(error=str(e)[:160])
+        finally:
+            _update["checked"] = True
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def update_status():
+    return dict(_update, current=VERSION, url=RELEASE_PAGE)
+
+
 def has_console():
     """Есть ли у процесса консоль. У exe, собранного без консоли, - нет."""
     if sys.platform != "win32":
@@ -1472,6 +1506,7 @@ def main():
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}"
     say(f"\nPickline запущен: {url}")
+    check_update_in_background()
 
     # Собственное окно, если есть pywebview и не просили браузер. Сервер
     # уходит в поток, окно занимает главный поток (так требует macOS);

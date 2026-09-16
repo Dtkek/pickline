@@ -53,6 +53,10 @@ h1 .logo { width: 22px; height: 22px; border-radius: 5px; }
 
 .spacer { flex: 1; }
 .src { color: var(--muted); font-size: 12px; }
+/* ссылка на новую версию в шапке: заметная, но не кричащая */
+.update { color: var(--accent); text-decoration: none; border: 1px solid var(--accent); border-radius: 6px; padding: 3px 8px; }
+.update:hover { background: var(--panel-2); }
+.update[hidden] { display: none; }
 
 main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 .view { display: none; }
