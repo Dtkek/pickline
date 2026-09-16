@@ -9,7 +9,7 @@
 import threading
 import time
 
-from vision import capture, recognize
+from vision import capture, recognize, roles
 
 
 class ScreenWatcher:
@@ -18,10 +18,14 @@ class ScreenWatcher:
         self.hero_names = hero_names or {}
         self.source = source
         self.recognizer = recognize.Recognizer(self.hero_names)
+        self.role_reader = roles.RoleReader()
         self.interval = interval
         # функция без аргументов: True, если сейчас сканировать не нужно
         # (например, игра через GSI сообщила, что матч уже идёт)
         self.pause_check = None
+        # функция без аргументов: "radiant" / "dire" / None - своя сторона
+        # по данным игры (GSI); без неё сторона берётся по подписям ролей
+        self.team_hint = None
         self.monitor = monitor
         # по умолчанию верхняя половина экрана: там идёт драфт
         self.region = region or (0.0, 0.0, 1.0, 0.55)
@@ -44,6 +48,9 @@ class ScreenWatcher:
             "frame_brightness": None,
             "frame_hint": None,
             "frame_width": None,
+            # подписи ролей своей команды: {"side", "slots": [поз|None]*5,
+            # "labels": [...], "taken": [слоты с портретами]} или None
+            "roles": None,
         }
 
     # --- состояние --------------------------------------------------------
@@ -191,6 +198,12 @@ class ScreenWatcher:
             self._state["frame_width"] = w
         hits, width = self.recognizer.scan(frame)
         self._apply(hits, width, mode=f"проверка на файле {w}×{h}")
+        # у файла область захвата - весь кадр, а не настроенная полоса
+        region, self.region = self.region, (0.0, 0.0, 1.0, 1.0)
+        try:
+            self._read_roles(frame, hits, width if hits else None)
+        finally:
+            self.region = region
         self._set(last_error=None)
         return self.state()
 
@@ -203,7 +216,55 @@ class ScreenWatcher:
         frame = self._grab()
         hits, width = self.recognizer.scan(frame)
         self._apply(hits, width, mode="разовый поиск")
+        self._read_roles(frame, hits, width if hits else None)
         return self.state()
+
+    # --- подписи ролей -----------------------------------------------------
+    def _read_roles(self, frame, hits, width):
+        """Подписи ролей своей команды в кадре -> в состояние.
+
+        Сторона - от игры (GSI), а без неё - та, где подписи нашлись:
+        у врагов их нет. Слоты с портретами - чтобы знать, какие роли
+        уже заняты. Ошибка чтения не должна ронять слежение.
+        """
+        if not self.role_reader.ready:
+            return
+        try:
+            boxes = [h["box"] for h in hits] if hits else None
+            # width - ширина портрета, которой можно верить: измеренная по
+            # найденным портретам сейчас или при калибровке; без попаданий
+            # распознаватель отдаёт последнюю пробную ширину, её не передают
+            out = self.role_reader.read(frame, boxes=boxes, template_width=width,
+                                        region=self.region)
+            labels = out["labels"]
+            fw = frame.shape[1]
+            side = self.team_hint() if self.team_hint else None
+            if side not in ("radiant", "dire"):
+                if not labels:
+                    self._set(roles=None)
+                    return
+                mean_cx = sum(l["cx"] for l in labels) / len(labels)
+                side = "dire" if mean_cx > fw / 2 else "radiant"
+            if not labels:
+                self._set(roles={"side": side, "slots": [None] * 5, "labels": [],
+                                 "taken": [], "scale": out["scale"]})
+                return
+            slots = roles.assign_slots(labels, side, fw, out["scale"])
+            # портреты своей стороны -> номера занятых слотов
+            taken = []
+            for h in hits or []:
+                x, y, w, _ = h["box"]
+                cx = x + w / 2
+                on_my_side = (cx > fw / 2) == (side == "dire")
+                if not on_my_side:
+                    continue
+                i = roles.slot_index(cx, side, fw, out["scale"])
+                if 0 <= i <= 4:
+                    taken.append(i)
+            self._set(roles={"side": side, "slots": slots, "labels": labels,
+                             "taken": sorted(set(taken)), "scale": out["scale"]})
+        except Exception as e:  # noqa: BLE001 - подписи вторичны, героев это не касается
+            self._set(roles=None, last_error=f"подписи ролей: {e}")
 
     # --- внутреннее -------------------------------------------------------
     def _apply(self, hits, width, mode):
@@ -288,6 +349,7 @@ class ScreenWatcher:
                     if not hits and known_width:
                         hits, width = self.recognizer.scan(frame)
                     self._apply(hits, width, mode="поиск" if changed else "страховочный поиск")
+                    self._read_roles(frame, hits, width if hits else known_width)
                     if hits:
                         known_width = width
                         tops = [h["box"][1] for h in hits]

@@ -18,6 +18,7 @@ import argparse
 import json
 import sys
 import threading
+import time
 import traceback
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -69,6 +70,9 @@ def get_watcher():
             _watcher = ScreenWatcher(names, source=src)
             # если игра на связи и матч уже идёт - экран не сканируем
             _watcher.pause_check = _gsi_says_in_game
+            # своя сторона по данным игры: подписи ролей раскладываются
+            # по слотам от центра экрана, а Radiant слева, Dire справа
+            _watcher.team_hint = lambda: gsi.state().get("team")
         return _watcher
 
 
@@ -118,7 +122,7 @@ CDN = "https://cdn.cloudflare.steamstatic.com"
 
 # Версия показывается в консоли и в шапке страницы: когда что-то идёт не так,
 # первым делом нужно понять, какой код на самом деле запущен.
-VERSION = "2026-09-16.1"
+VERSION = "2026-09-16.2"
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -194,6 +198,27 @@ def ids_for_position(position):
     except (TypeError, ValueError):
         return None
     return {hid for hid, pos in hero_positions().items() if want in pos}
+
+
+POSITION_NAMES = {1: "Лёгкая", 2: "Центр", 3: "Сложная", 4: "Поддержка", 5: "Полная поддержка"}
+
+
+def screen_roles():
+    """Подписи ролей с экрана из слежения: {"slots", "taken", "side"} или None.
+
+    Есть только пока слежение включено и подписи читаются (рейтинг с
+    выбором ролей, своя команда). Устаревшие данные не отдаём: если
+    последний скан старше минуты, драфт мог смениться.
+    """
+    if not vision.AVAILABLE or _watcher is None:
+        return None
+    st = _watcher.state()
+    roles = st.get("roles")
+    if not roles or not any(roles.get("slots") or []):
+        return None
+    if not st.get("last_scan") or time.time() - st["last_scan"] > 60:
+        return None
+    return roles
 
 
 # позиция считается занятой союзником, если на неё приходится хотя бы
@@ -1122,14 +1147,33 @@ class Handler(BaseHTTPRequestHandler):
                 position_auto = None
                 auto_positions = None
                 if position == "auto":
-                    free, taken = free_positions([int(x) for x in (data.get("ally") or [])])
+                    # 1) подписи ролей с экрана + номер своего слота от игры;
+                    # 2) подписи с экрана: роли слотов без портретов свободны;
+                    # 3) по союзникам (справочник позиций) - запасной путь
+                    free, taken, reason = None, [], None
+                    screen = screen_roles()
+                    if screen:
+                        slots, taken_slots = screen["slots"], screen["taken"]
+                        my_slot = gsi.state().get("team_slot")
+                        if isinstance(my_slot, int) and 0 <= my_slot < 5 and slots[my_slot]:
+                            free = [slots[my_slot]]
+                            reason = (f"по подписи под вашим слотом на экране: "
+                                      f"«{POSITION_NAMES.get(slots[my_slot])}»")
+                        else:
+                            free = sorted({p for i, p in enumerate(slots)
+                                           if p and i not in taken_slots})
+                            if free:
+                                reason = ("по подписям ролей на экране: свободны слоты без героев"
+                                          + ("" if my_slot is None else
+                                             ", подпись под вашим слотом не прочиталась"))
+                    if not free:
+                        free, taken = free_positions([int(x) for x in (data.get("ally") or [])])
+                        reason = (("союзники заняли " + ", ".join(map(str, taken))) if taken
+                                  else "союзники ещё не взяты - позиции все")
                     auto_positions = free if len(free) < 5 else None
                     position = str(free[0]) if len(free) == 1 else ""
-                    position_auto = {
-                        "positions": auto_positions, "taken": taken,
-                        "reason": ("союзники заняли " + ", ".join(map(str, taken))) if taken
-                                  else "союзники ещё не взяты - позиции все",
-                    }
+                    position_auto = {"positions": auto_positions, "taken": taken,
+                                     "reason": reason, "screen": bool(screen)}
                 stratz_bound, base_stats, allowed_ids = None, None, ids_for_position(position)
                 if auto_positions and not position:
                     allowed_ids = set().union(*(ids_for_position(p) for p in auto_positions))

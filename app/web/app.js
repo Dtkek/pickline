@@ -168,8 +168,11 @@ async function boot() {
     state.positions = Object.fromEntries((data.positions || []).map((p) => [p.key, p.label]));
     // «Авто» - только в подборе: свободные позиции считаются по союзникам,
     // которых видно на экране или отмечено рукой (игра свою роль не сообщает)
-    fillSelect($('#position'), [['', 'Любая'], ['auto', 'Авто — по союзникам на экране']]
+    fillSelect($('#position'), [['auto', 'Авто — по союзникам на экране'], ['', 'Любая']]
       .concat((data.positions || []).map((p) => [p.key, p.label])));
+    // «Авто» по умолчанию: без союзников оно равно «Любая», а с ними
+    // сужает список само - пользователю не нужно вспоминать про этот пункт
+    $('#position').value = 'auto';
     fillSelect($('#meta-position'), posOptions);
     fillSelect($('#tour-position'), posOptions);
 
@@ -419,8 +422,8 @@ function renderRecommendations(out, data) {
     line.style.marginBottom = '6px';
     const label = (p) => (state.positions || {})[String(p)] || String(p);
     if (pa.positions && pa.positions.length === 1) {
-      line.textContent = `Позиция по союзникам: ${label(pa.positions[0])} — ${pa.reason}. ` +
-        'Не так? Выберите позицию в списке.';
+      line.textContent = `${pa.screen ? 'Позиция с экрана' : 'Позиция по союзникам'}: ` +
+        `${label(pa.positions[0])} — ${pa.reason}. Не так? Выберите позицию в списке.`;
     } else if (pa.positions) {
       line.textContent = `Свободные позиции: ${pa.positions.map(label).join(', ')} — ${pa.reason}. ` +
         'Показаны герои всех свободных; уточните позицию в списке.';
