@@ -256,19 +256,34 @@ def memo_write(key, data):
     _write_cache("memo://" + key, data)
 
 
-def compute_in_background(key, fn):
-    """Один поток на ключ: считает fn() и кладёт результат в памятку."""
+def compute_in_background(key, fn, force=False):
+    """Один поток на ключ: считает fn() и кладёт результат в памятку.
+
+    Неудача запоминается (memo_status отдаёт её текст), и следующая попытка
+    по тому же ключу - не раньше MEMO_RETRY_AFTER: на канале, где
+    рукопожатие с OpenDota рвётся, каждый запрос страницы иначе заводил
+    новую многоминутную цепочку повторов. force - попытка сейчас (кнопка
+    «Обновить»).
+    """
     url = "memo://" + key
     with _refresh_lock:
         if url in _refreshing:
+            return None
+        if not force and time.time() - _refresh_failed_at.get(url, 0) < MEMO_RETRY_AFTER:
             return None
         _refreshing.add(url)
 
     def worker():
         try:
             memo_write(key, fn())
-        except Exception:  # noqa: BLE001 — фоновый пересчёт не критичен
-            pass
+            _refresh_failed_at.pop(url, None)
+            _last_error.pop(url, None)
+        except Exception as e:  # noqa: BLE001 — фоновый пересчёт не критичен
+            _refresh_failed_at[url] = time.time()
+            text = describe_error(e)
+            if _last_error.get(url) != text:
+                sys.stderr.write(f"  сеть: фоновый счёт не удался ({text}): {key}\n")
+            _last_error[url] = text
         finally:
             with _refresh_lock:
                 _refreshing.discard(url)
@@ -276,6 +291,20 @@ def compute_in_background(key, fn):
     t = threading.Thread(target=worker, daemon=True)
     t.start()
     return t
+
+
+def memo_status(key):
+    """Состояние памятки: считается ли сейчас, когда обновлена, что сломалось."""
+    url = "memo://" + key
+    with _refresh_lock:
+        computing = url in _refreshing
+    st = status(url)
+    st["computing"] = computing
+    return st
+
+
+# после неудачного фонового счёта - пауза перед новой попыткой
+MEMO_RETRY_AFTER = 2 * 60
 
 
 # url -> текст последней ошибки сети, из-за которой отдана копия из кэша

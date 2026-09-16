@@ -122,7 +122,7 @@ CDN = "https://cdn.cloudflare.steamstatic.com"
 
 # Версия показывается в консоли и в шапке страницы: когда что-то идёт не так,
 # первым делом нужно понять, какой код на самом деле запущен.
-VERSION = "2026-09-16.4"
+VERSION = "2026-09-16.5"
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -355,9 +355,32 @@ def tournament_fast(source, months=3, tier="top", leagueid=None, wait=False):
     return None, 0, True
 
 
-def tournament_table(source, months=3, tier="top", leagueid=None):
-    """Турнирная статистика по героям с долями от числа матчей."""
-    rows, total, _ = tournament_fast(source, months, tier, leagueid, wait=True)
+def tournament_table(source, months=3, tier="top", leagueid=None, force=False):
+    """Турнирная статистика по героям с долями от числа матчей.
+
+    Возвращает (строки, матчей, pending, note). Сеть не ждёт: раньше вкладка
+    «Турниры» висела минуты и падала с ошибкой там, где OpenDota не
+    отвечает, - теперь показывает памятку или снимок, а свежее досчитывает
+    в фоне; force - пересчитать сейчас (кнопка «Обновить»).
+    """
+    key = f"tournament/{int(months)}/{tier}/{int(leagueid or 0)}"
+    if force:
+        def compute():
+            rows, total = source.tournament_stats(months, tier, leagueid)
+            return {"rows": rows, "total": total}
+        net.compute_in_background(key, compute, force=True)
+    rows, total, _ = tournament_fast(source, months, tier, leagueid)
+    st = net.memo_status(key)
+    memo_fresh = net.memo_read(key, TOUR_FRESH) is not None
+    memo_any = memo_fresh or net.memo_read(key, TOUR_MAX_AGE) is not None
+    pending = st["computing"]
+    if memo_fresh and not pending:
+        note = None
+    else:
+        note = _fast_note(st, None if memo_any else tour_snapshot_date,
+                          "турнирная статистика", empty=rows is None)
+    if rows is None:
+        return [], 0, pending, note
     stats_by_id = {h["id"]: h for h in source.hero_stats()}
     out = []
     for r in rows:
@@ -375,7 +398,7 @@ def tournament_table(source, months=3, tier="top", leagueid=None):
             "ban_rate": round(bans / total * 100, 1) if total else 0,
             "contest_rate": round((picks + bans) / total * 100, 1) if total else 0,
         })
-    return out, total
+    return out, total, pending, note
 
 
 def pro_matches(source, limit=40):
@@ -675,14 +698,15 @@ def _talent_name(dname):
     return cleaned, True
 
 
-def hero_skills(source, hero_id, months=3, tier="top"):
+def hero_skills(source, hero_id, months=3, tier="top", rows=None):
     """Прокачка и таланты героя по турнирным матчам.
 
     Порядок - для каждой позиции апгрейда самая частая способность и доля
     игр, где взяли именно её. Таланты по уровням 10/15/20/25: доля среди
     игр, где на этом уровне взят какой-либо талант, и винрейт этих игр.
     """
-    rows = source.hero_skills(hero_id, months, tier)
+    if rows is None:
+        rows = source.hero_skills(hero_id, months, tier)
     ab = source.abilities()
     stats_by_id = {h["id"]: h for h in source.hero_stats()}
     hero_name = (stats_by_id.get(hero_id) or {}).get("name")
@@ -752,7 +776,7 @@ def hero_skills(source, hero_id, months=3, tier="top"):
     return {"hero_id": hero_id, "games": games, "order": order, "talents": talents}
 
 
-def hero_build(source, hero_id, months=3, enemy_ids=None, tier="top"):
+def hero_build(source, hero_id, months=3, enemy_ids=None, tier="top", general_rows=None):
     """Сборка героя по турнирным матчам: общая и против конкретного драфта.
 
     Стартовый закуп - предметы, купленные до рога хотя бы в 40% игр.
@@ -768,13 +792,16 @@ def hero_build(source, hero_id, months=3, enemy_ids=None, tier="top"):
     items = source.items() or {}
     by_id = {it["id"]: name for name, it in items.items() if it.get("id")}
 
-    general = _build_from_rows(source, *source.hero_builds(hero_id, months, tier), items, by_id)
+    # general_rows - готовые строки базы (из снимка): сеть не трогаем,
+    # сборка против драфта по ним невозможна - она считается отдельно
+    rows = general_rows if general_rows is not None else source.hero_builds(hero_id, months, tier)
+    general = _build_from_rows(source, *rows, items, by_id)
     if not general:
         return {"hero_id": hero_id, "games": 0}
 
     enemy_ids = [int(e) for e in (enemy_ids or []) if int(e) != int(hero_id)]
     vs, shifts = None, []
-    if enemy_ids:
+    if enemy_ids and general_rows is None:
         vs = _build_from_rows(source, *source.hero_builds(hero_id, months, tier, enemy_ids=enemy_ids),
                               items, by_id)
         if vs:
@@ -818,6 +845,115 @@ def hero_build(source, hero_id, months=3, enemy_ids=None, tier="top"):
         } if enemy_ids else None,
     }
     return out
+
+
+# --- сборка и прокачка без ожидания сети ---------------------------------
+# Тот же порядок, что у турнирной статистики: свежая памятка → устаревшая
+# памятка (пересчёт в фоне) → снимок из репозитория (пересчёт в фоне) →
+# ничего, pending, страница дозапросит. На канале, где рукопожатие с
+# OpenDota рвётся, живой запрос шёл минуты и заканчивался ошибкой; снимок
+# показывает общую сборку сразу, а живая подменяет её, когда доходит.
+
+BUILDS_SNAPSHOT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "data", "builds_fallback.json.gz")
+_builds_snapshot_cache = None
+
+
+def builds_snapshot():
+    """Снимок сборок: {"снято", "months", "tier", "builds": {id: {...}}, "skills": {id: rows}}."""
+    global _builds_snapshot_cache
+    if _builds_snapshot_cache is None:
+        try:
+            import gzip
+            with gzip.open(BUILDS_SNAPSHOT, "rt", encoding="utf-8") as f:
+                _builds_snapshot_cache = json.load(f)
+        except (OSError, ValueError):
+            _builds_snapshot_cache = {}
+    return _builds_snapshot_cache
+
+
+def _fast_note(st, snapshot_date=None, what="данные", empty=False):
+    """Пояснение к показанной копии: считается в фоне / OpenDota не отвечает.
+
+    snapshot_date - показан снимок из репозитория; empty - показывать нечего.
+    """
+    shown = ("" if empty else
+             f", пока показан снимок от {snapshot_date}" if snapshot_date
+             else ", пока показана прежняя копия")
+    if st.get("computing"):
+        return f"{what}: считается по базе OpenDota{shown}"
+    if st.get("error"):
+        return f"{what}: OpenDota не отвечает ({st['error']}){shown.replace(', пока', ',')}" + (
+            "; данных нет" if empty else "")
+    if empty:
+        return f"{what}: данных нет"
+    return f"{what}: показан снимок от {snapshot_date}" if snapshot_date else None
+
+
+def _memo_first(key, compute, force):
+    """Свежая памятка - готово; иначе фон и (устаревшая памятка, статус)."""
+    memo = net.memo_read(key, TOUR_FRESH)
+    if memo is not None and not force:
+        return memo, None, None
+    net.compute_in_background(key, compute, force=force)
+    return None, net.memo_read(key, TOUR_MAX_AGE), net.memo_status(key)
+
+
+def hero_build_fast(source, hero_id, months=3, enemy_ids=None, tier="top", force=False):
+    enemy_ids = sorted(int(e) for e in (enemy_ids or []) if int(e) != int(hero_id))
+    key = f"build/{int(hero_id)}/{int(months)}/{tier}/{','.join(map(str, enemy_ids))}"
+    ready, stale, st = _memo_first(key, lambda: hero_build(source, hero_id, months, enemy_ids, tier), force)
+    if ready is not None:
+        return ready
+    if stale is not None:
+        return dict(stale, pending=st["computing"], note=_fast_note(st, what="сборка"))
+    vs_hint = "; сборка против этого драфта появится, когда досчитается" if enemy_ids and st["computing"] else ""
+    # общая сборка без врагов уже могла быть посчитана - она лучше снимка
+    if enemy_ids:
+        general = net.memo_read(f"build/{int(hero_id)}/{int(months)}/{tier}/", TOUR_MAX_AGE)
+        if general is not None:
+            out = dict(general, vs=None, pending=st["computing"])
+            out["note"] = (_fast_note(st, what="сборка") or "сборка: общая, без учёта врагов") + vs_hint
+            return out
+    snap = builds_snapshot()
+    rows = (snap.get("builds") or {}).get(str(int(hero_id)))
+    if rows:
+        out = hero_build(source, hero_id, snap.get("months", months), None, snap.get("tier", tier),
+                         general_rows=(rows["purchases"], rows["final"]))
+        out["pending"] = st["computing"]
+        out["snapshot"] = snap.get("снято")
+        out["note"] = _fast_note(st, snap.get("снято"), "сборка") + vs_hint
+        return out
+    return {"hero_id": hero_id, "games": 0, "pending": st["computing"],
+            "note": _fast_note(st, what="сборка", empty=True)}
+
+
+def hero_skills_fast(source, hero_id, months=3, tier="top", force=False):
+    key = f"skills/{int(hero_id)}/{int(months)}/{tier}"
+    ready, stale, st = _memo_first(key, lambda: hero_skills(source, hero_id, months, tier), force)
+    if ready is not None:
+        return ready
+    if stale is not None:
+        return dict(stale, pending=st["computing"], note=_fast_note(st, what="прокачка"))
+    snap = builds_snapshot()
+    rows = (snap.get("skills") or {}).get(str(int(hero_id)))
+    if rows:
+        out = hero_skills(source, hero_id, snap.get("months", months), snap.get("tier", tier), rows=rows)
+        out["pending"] = st["computing"]
+        out["note"] = _fast_note(st, snap.get("снято"), "прокачка")
+        return out
+    return {"hero_id": hero_id, "games": 0, "pending": st["computing"],
+            "note": _fast_note(st, what="прокачка", empty=True)}
+
+
+def tournament_leagues_fast(source, months=3, force=False):
+    """Список турниров: из памятки, снимка нет - пустой список и pending."""
+    key = f"leagues/{int(months)}"
+    ready, stale, st = _memo_first(key, lambda: source.tournament_leagues(months), force)
+    if ready is not None:
+        return {"leagues": ready, "pending": False}
+    return {"leagues": stale or [], "pending": st["computing"],
+            "note": _fast_note(st, what="список турниров", empty=not stale)}
 
 
 def pro_match_detail(source, match_id):
@@ -995,10 +1131,11 @@ class Handler(BaseHTTPRequestHandler):
                 months = int((q.get("months") or ["3"])[0])
                 tier = (q.get("tier") or ["top"])[0]
                 league = (q.get("league") or [None])[0] or None
-                rows, total = tournament_table(src, months, tier, league)
+                force = (q.get("force") or ["0"])[0] == "1"
+                rows, total, pending, note = tournament_table(src, months, tier, league, force)
                 return self._json({"rows": rows, "total_matches": total,
                                    "months": months, "tier": tier,
-                                   "league": league})
+                                   "league": league, "pending": pending, "note": note})
             if url.path == "/api/gsi/state":
                 s = gsi.state()
                 # имя героя из игры -> id из справочника
@@ -1039,7 +1176,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "не передан герой"}, 400)
                 months = min(int((q.get("months") or ["3"])[0]), 3)
                 tier = (q.get("tier") or ["top"])[0]
-                return self._json(hero_skills(src, int(hero), months, tier))
+                force = (q.get("force") or ["0"])[0] == "1"
+                return self._json(hero_skills_fast(src, int(hero), months, tier, force))
             if url.path == "/api/build":
                 hero = (q.get("hero") or [None])[0]
                 if not hero:
@@ -1048,10 +1186,11 @@ class Handler(BaseHTTPRequestHandler):
                 months = min(int((q.get("months") or ["3"])[0]), 3)
                 enemies = [int(x) for x in (q.get("enemy") or [""])[0].split(",") if x.strip()]
                 tier = (q.get("tier") or ["top"])[0]
-                return self._json(hero_build(src, int(hero), months, enemies, tier))
+                force = (q.get("force") or ["0"])[0] == "1"
+                return self._json(hero_build_fast(src, int(hero), months, enemies, tier, force))
             if url.path == "/api/tournaments/leagues":
                 months = int((q.get("months") or ["3"])[0])
-                return self._json({"leagues": src.tournament_leagues(months)})
+                return self._json(tournament_leagues_fast(src, months))
             if url.path == "/api/pro/match":
                 mid = (q.get("id") or [None])[0]
                 if not mid:

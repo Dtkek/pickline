@@ -597,7 +597,7 @@ function setMyHero(id, how) {
   loadBuild(how);
 }
 
-async function loadBuild(how) {
+async function loadBuild(how, quiet) {
   const out = $('#build-out');
   if (!me.heroId) {
     out.className = 'empty-hint';
@@ -606,9 +606,12 @@ async function loadBuild(how) {
   }
   const hero = state.byId.get(me.heroId);
   const enemies = state.draft.enemy.filter((id) => id !== me.heroId);
-  out.className = 'loading';
-  out.textContent = `Собираю сборку ${hero ? hero.name : ''} по турнирным матчам` +
-    (enemies.length ? ' и отдельно против этого драфта' : '') + '…';
+  // quiet - дозапрос, пока сервер досчитывает: показ не сбрасывать
+  if (!quiet) {
+    out.className = 'loading';
+    out.textContent = `Собираю сборку ${hero ? hero.name : ''} по турнирным матчам` +
+      (enemies.length ? ' и отдельно против этого драфта' : '') + '…';
+  }
   const token = ++me.buildToken;
   try {
     const q = new URLSearchParams({
@@ -622,16 +625,36 @@ async function loadBuild(how) {
     out.className = '';
     renderBuild(out, b, hero, how);
     loadSkills(out, token);
+    // сервер отдал снимок или прежнюю копию, а живую сборку считает в фоне -
+    // дозапросить, пока не досчитает (но не бесконечно: на битом канале
+    // сервер сам скажет, что OpenDota не отвечает, и pending снимется)
+    if (b.pending) pollLater(() => token === me.buildToken && loadBuild(how, true), 'build');
+    else pollDone('build');
   } catch (e) { if (token === me.buildToken) { out.className = ''; showError(out, e); } }
 }
 
+// повторные запросы, пока сервер досчитывает в фоне: 5 с, потом реже,
+// всего не дольше ~3 минут на ключ
+const pollState = {};
+function pollLater(fn, key) {
+  const st = pollState[key] || (pollState[key] = { n: 0 });
+  if (st.n >= 20) return;
+  st.n += 1;
+  clearTimeout(st.timer);
+  st.timer = setTimeout(fn, st.n < 6 ? 5000 : 12000);
+}
+function pollDone(key) { if (pollState[key]) { pollState[key].n = 0; clearTimeout(pollState[key].timer); } }
+
 // прокачка и таланты грузятся отдельно: это ещё один запрос к базе,
 // и сборка не должна его ждать
-async function loadSkills(out, token) {
-  const box = el('div');
-  box.style.marginTop = '10px';
-  box.appendChild(el('div', 'loading', 'Считаю прокачку и таланты…'));
-  out.appendChild(box);
+async function loadSkills(out, token, again) {
+  // again - блок от прошлого показа: при дозапросе не плодить новые
+  const box = again || el('div');
+  if (!again) {
+    box.style.marginTop = '10px';
+    box.appendChild(el('div', 'loading', 'Считаю прокачку и таланты…'));
+    out.appendChild(box);
+  }
   try {
     const q = new URLSearchParams({
       hero: me.heroId,
@@ -642,6 +665,8 @@ async function loadSkills(out, token) {
     if (token !== me.buildToken) return;
     box.innerHTML = '';
     renderSkills(box, s);
+    if (s.pending) pollLater(() => token === me.buildToken && loadSkills(out, token, box), 'skills');
+    else pollDone('skills');
   } catch (e) {
     if (token === me.buildToken) { box.innerHTML = ''; showError(box, e); }
   }
@@ -651,8 +676,10 @@ async function loadSkills(out, token) {
 // иконками по уровням и таланты слева-справа от уровня, выбранный подсвечен
 function renderSkills(box, s) {
   box.appendChild(el('div', 'section-title', 'Способности'));
+  // откуда данные: снимок, считается в фоне, OpenDota не отвечает
+  if (s.note) box.appendChild(el('div', s.pending || !/не отвечает/.test(s.note) ? 'dim' : 'error', s.note));
   if (!s.games) {
-    box.appendChild(el('div', 'dim', 'Данных по прокачке за период нет.'));
+    if (!s.pending) box.appendChild(el('div', 'dim', 'Данных по прокачке за период нет.'));
     return;
   }
   const sub = el('div', 'skills-sub');
@@ -728,8 +755,14 @@ function renderBuild(out, b, hero, how) {
     b.games
       ? `— ${b.games} турнирных игр (${tierName}) за ${b.months} мес, винрейт ${b.winrate}%` +
         (how ? ` · герой определён: ${how}` : '')
-      : `— в турнирах (${tierName}) за этот период герой не встречался`));
+      : (b.pending ? '— считаю по базе турнирных матчей…'
+        : `— в турнирах (${tierName}) за этот период герой не встречался`)));
   out.appendChild(head);
+  if (b.note) {
+    const n = el('div', b.pending || !/не отвечает/.test(b.note) ? 'dim' : 'error', b.note);
+    n.style.marginBottom = '8px';
+    out.appendChild(n);
+  }
   if (!b.games) return;
 
   // против конкретного драфта: сколько игр и по чему считается показ
@@ -1326,7 +1359,15 @@ $('#tour-position').addEventListener('change', () => renderTournaments());
 async function loadTournamentLeagues() {
   const months = $('#tour-months').value;
   if (tour.leaguesFor === months) return;
-  const data = await api('/api/tournaments/leagues?months=' + months);
+  let data;
+  try {
+    data = await api('/api/tournaments/leagues?months=' + months);
+  } catch (e) {
+    return; // без списка турниров вкладка работает: остаётся «Все»
+  }
+  if (data.pending) pollLater(loadTournamentLeagues, 'leagues');
+  else pollDone('leagues');
+  if (!data.leagues.length) return;
   tour.leaguesFor = months;
   const sel = $('#tour-league');
   const keep = sel.value;
@@ -1344,29 +1385,42 @@ async function loadTournamentLeagues() {
 }
 
 let tourLoaded = false;
-async function loadTournaments(force) {
+let tourToken = 0;
+async function loadTournaments(force, recompute) {
   if (tourLoaded && !force) return;
   const out = $('#tour-out');
-  out.className = 'loading';
-  out.textContent = 'Считаю по базе турнирных матчей, это может занять полминуты…';
+  if (!tourLoaded) {
+    out.className = 'loading';
+    out.textContent = 'Загрузка…';
+  }
+  const token = ++tourToken;
+  // список турниров - параллельно, таблицу он не задерживает
+  loadTournamentLeagues();
   try {
-    await loadTournamentLeagues();
     const q = new URLSearchParams({
       months: $('#tour-months').value,
       tier: $('#tour-tier').value,
       league: $('#tour-league').value,
     });
+    if (recompute) q.set('force', '1');
     const data = await api('/api/tournaments?' + q);
+    if (token !== tourToken) return;
     tour.rows = data.rows;
     tour.total = data.total_matches;
+    tour.note = data.note;
+    tour.pending = data.pending;
     tourLoaded = true;
     out.className = 'scroll';
     renderTournaments();
+    // сервер показал снимок или прежнюю копию, свежее считает в фоне
+    if (data.pending) pollLater(() => token === tourToken && loadTournaments(true), 'tour');
+    else pollDone('tour');
   } catch (e) {
     out.className = '';
     showError(out, e);
   }
 }
+$('#tour-refresh').addEventListener('click', () => loadTournaments(true, true));
 
 function renderTournaments() {
   const out = $('#tour-out');
@@ -1386,9 +1440,14 @@ function renderTournaments() {
     'героя взяли или забанили; спорность — их сумма. Винрейт считается только по пикам.' +
     (position ? ' Позиции героев — по справочнику из про-матчей; один герой может стоять на нескольких.' : '');
   out.innerHTML = '';
+  // откуда данные: снимок, прежняя копия, считается, OpenDota не отвечает
+  if (tour.note) {
+    out.appendChild(el('div', tour.pending || !/не отвечает/.test(tour.note) ? 'dim' : 'error', tour.note));
+  }
   if (!rows.length) {
     out.appendChild(el('div', 'empty-hint', position
-      ? 'На этой позиции за период никого не брали.' : 'За этот период матчей нет.'));
+      ? 'На этой позиции за период никого не брали.'
+      : (tour.pending ? 'Считаю по базе турнирных матчей…' : 'За этот период матчей нет.')));
     return;
   }
   const table = el('table');
