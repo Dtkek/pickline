@@ -123,7 +123,7 @@ CDN = "https://cdn.cloudflare.steamstatic.com"
 
 # Версия показывается в консоли и в шапке страницы: когда что-то идёт не так,
 # первым делом нужно понять, какой код на самом деле запущен.
-VERSION = "2026-09-16.7"
+VERSION = "2026-09-16.8"
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -964,9 +964,12 @@ def tournament_leagues_fast(source, months=3, force=False):
 # времени, сторон и героев слишком много, а первый ответ в любом случае
 # приходит из памятки после первого же показа.
 
-# картинка карты - у OpenDota; кэшируется в папке данных один раз
+# картинка карты лежит в сборке (app/data/map_740.webp, снята у OpenDota):
+# на канале, где www.opendota.com не открывается, пользователь получал
+# схему вместо карты. Скачивание - только если файла в сборке нет
 MAP_URL = "https://www.opendota.com/assets/images/dota2/map/detailed_740.webp"
 MAP_FILE = os.path.join(paths.DATA_DIR, "assets", "map_740.webp")
+MAP_BUNDLED = paths.data_file("map_740.webp")
 # окна времени, минуты от рога (варды до рога - отрицательное время)
 WARD_WINDOWS = {"early": (-3, 5), "lane": (5, 10), "mid": (10, 20), "late": (20, 35), "end": (35, 180)}
 
@@ -1027,9 +1030,10 @@ def wards_table(source, months, tier, kind, side, hero_id, window, force=False):
 
 
 def map_image():
-    """Путь к картинке карты; качается один раз, при неудаче - None."""
-    if os.path.exists(MAP_FILE) and os.path.getsize(MAP_FILE) > 0:
-        return MAP_FILE
+    """Путь к картинке карты: из сборки; нет - скачать один раз; иначе None."""
+    for path in (MAP_BUNDLED, MAP_FILE):
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            return path
     ok, _why = net.download(MAP_URL, MAP_FILE, timeout=30)
     return MAP_FILE if ok else None
 
