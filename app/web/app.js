@@ -1341,10 +1341,73 @@ function renderMeta(out, rows) {
     tr.appendChild(el('td', 'num dim', String(r.pro_ban)));
     tr.appendChild(el('td', 'num dim',
       r.pro_winrate === null ? '—' : r.pro_winrate.toFixed(1) + '%'));
+    attachGuide(tr, r.id, 8, () => ({ months: 3, tier: 'top' }));
     tb.appendChild(tr);
   });
   table.appendChild(tb);
   out.appendChild(table);
+}
+
+// ---------------------------------------------------------------- гайд по клику
+// Строка таблицы («Турниры», «Мета») раскрывается по клику: сборка и
+// прокачка героя по турнирным матчам - тот же показ, что у своего героя
+// в «Драфте», только без сборки против драфта. Открыт один гайд за раз.
+let guideToken = 0;
+
+function attachGuide(tr, heroId, colSpan, opts) {
+  tr.classList.add('clickable');
+  tr.title = 'Показать сборку и прокачку по турнирным матчам';
+  tr.addEventListener('click', () => {
+    const next = tr.nextElementSibling;
+    const wasOpen = next && next.classList.contains('guide-row');
+    tr.parentElement.querySelectorAll('.guide-row').forEach((g) => g.remove());
+    tr.parentElement.querySelectorAll('tr.open').forEach((g) => g.classList.remove('open'));
+    guideToken += 1;
+    if (wasOpen) return;
+    const row = el('tr', 'guide-row');
+    const td = el('td');
+    td.colSpan = colSpan;
+    const box = el('div', 'guide');
+    td.appendChild(box);
+    row.appendChild(td);
+    tr.after(row);
+    tr.classList.add('open');
+    loadGuide(box, heroId, opts(), guideToken);
+  });
+}
+
+async function loadGuide(box, heroId, opts, token, quiet) {
+  const hero = state.byId.get(heroId);
+  const months = Math.min(Number(opts.months) || 3, 3);
+  const tier = opts.tier || 'top';
+  if (!quiet) {
+    box.className = 'guide loading';
+    box.textContent = `Собираю сборку ${hero ? hero.name : ''} по турнирным матчам…`;
+  }
+  try {
+    const b = await api('/api/build?' + new URLSearchParams({ hero: heroId, months, tier }));
+    if (token !== guideToken) return;
+    box.className = 'guide';
+    renderBuild(box, b, hero, '');
+    const sk = el('div');
+    sk.style.marginTop = '10px';
+    sk.appendChild(el('div', 'loading', 'Считаю прокачку и таланты…'));
+    box.appendChild(sk);
+    loadGuideSkills(sk, heroId, months, tier, token);
+    if (b.pending) pollLater(() => token === guideToken && loadGuide(box, heroId, opts, token, true), 'guide');
+    else pollDone('guide');
+  } catch (e) { if (token === guideToken) { box.className = 'guide'; showError(box, e); } }
+}
+
+async function loadGuideSkills(sk, heroId, months, tier, token) {
+  try {
+    const s = await api('/api/skills?' + new URLSearchParams({ hero: heroId, months, tier }));
+    if (token !== guideToken) return;
+    sk.innerHTML = '';
+    renderSkills(sk, s);
+    if (s.pending) pollLater(() => token === guideToken && loadGuideSkills(sk, heroId, months, tier, token), 'guide-skills');
+    else pollDone('guide-skills');
+  } catch (e) { if (token === guideToken) { sk.innerHTML = ''; showError(sk, e); } }
 }
 
 // ---------------------------------------------------------------- турниры
@@ -1482,6 +1545,8 @@ function renderTournaments() {
     if (r.winrate !== null && r.picks < 10) wr.classList.add('dim');
     wr.title = r.picks < 10 ? 'меньше 10 пиков — винрейт ненадёжен' : '';
     tr.appendChild(wr);
+    // по клику - сборка и прокачка героя за тот же период и уровень турниров
+    attachGuide(tr, r.id, 8, () => ({ months: $('#tour-months').value, tier: $('#tour-tier').value }));
     tb.appendChild(tr);
   });
   table.appendChild(tb);
