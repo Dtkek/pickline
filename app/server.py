@@ -123,7 +123,7 @@ CDN = "https://cdn.cloudflare.steamstatic.com"
 
 # Версия показывается в консоли и в шапке страницы: когда что-то идёт не так,
 # первым делом нужно понять, какой код на самом деле запущен.
-VERSION = "2026-09-16.8"
+VERSION = "2026-09-17.1"
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -1004,6 +1004,24 @@ def ward_spots(rows, radius=2, limit=12):
     return spots[:limit]
 
 
+WARDS_SNAPSHOT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "data", "wards_fallback.json.gz")
+_wards_snapshot_cache = None
+
+
+def wards_snapshot():
+    """Снимок вардов: {"снято", "months", "tier", "cells": {"obs/radiant/early": {rows, total}}}."""
+    global _wards_snapshot_cache
+    if _wards_snapshot_cache is None:
+        try:
+            import gzip
+            with gzip.open(WARDS_SNAPSHOT, "rt", encoding="utf-8") as f:
+                _wards_snapshot_cache = json.load(f)
+        except (OSError, ValueError):
+            _wards_snapshot_cache = {}
+    return _wards_snapshot_cache
+
+
 def wards_table(source, months, tier, kind, side, hero_id, window, force=False):
     t0, t1 = WARD_WINDOWS.get(window, WARD_WINDOWS["early"])
     key = f"wards/{int(months)}/{tier}/{kind}/{side}/{int(hero_id or 0)}/{window}"
@@ -1014,10 +1032,20 @@ def wards_table(source, months, tier, kind, side, hero_id, window, force=False):
 
     ready, stale, st = _memo_first(key, compute, force)
     data = ready if ready is not None else stale
+    snapshot_date = None
+    if data is None and not hero_id:
+        # снимок покрывает сочетания без героя за свои период и уровень;
+        # если фильтры другие - показываем его же, но говорим об этом
+        snap = wards_snapshot()
+        data = (snap.get("cells") or {}).get(f"{kind}/{side}/{window}")
+        if data:
+            snapshot_date = snap.get("снято")
+            if int(snap.get("months", months)) != int(months) or snap.get("tier", tier) != tier:
+                snapshot_date = f"{snapshot_date} ({snap.get('months')} мес, {snap.get('tier')})"
     out = {"kind": kind, "side": side, "hero_id": hero_id, "window": window,
            "from": t0, "to": t1, "months": months, "tier": tier,
            "pending": bool(st and st["computing"]),
-           "note": None if ready is not None else _fast_note(st, what="варды", empty=data is None)}
+           "note": None if ready is not None else _fast_note(st, snapshot_date, "варды", empty=data is None)}
     if data is None:
         out.update(total_matches=0, wards=0, cells=[], spots=[])
         return out

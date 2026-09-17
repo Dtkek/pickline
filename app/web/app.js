@@ -640,11 +640,15 @@ async function loadBuild(how, quiet) {
 const pollState = {};
 function pollLater(fn, key) {
   const st = pollState[key] || (pollState[key] = { n: 0 });
-  if (st.n >= 20) return;
+  if (st.n >= 20) return false;
   st.n += 1;
   clearTimeout(st.timer);
   st.timer = setTimeout(fn, st.n < 6 ? 5000 : 12000);
+  return true;
 }
+// дозапросы кончились, а сервер всё «считает»: сказать, что делать
+const POLL_GAVE_UP = 'Сервер считает дольше обычного — похоже, OpenDota не отвечает. ' +
+  'Нажмите «Обновить» позже или проверьте VPN.';
 function pollDone(key) { if (pollState[key]) { pollState[key].n = 0; clearTimeout(pollState[key].timer); } }
 
 // прокачка и таланты грузятся отдельно: это ещё один запрос к базе,
@@ -1478,8 +1482,11 @@ async function loadTournaments(force, recompute) {
     out.className = 'scroll';
     renderTournaments();
     // сервер показал снимок или прежнюю копию, свежее считает в фоне
-    if (data.pending) pollLater(() => token === tourToken && loadTournaments(true), 'tour');
-    else pollDone('tour');
+    if (data.pending) {
+      if (!pollLater(() => token === tourToken && loadTournaments(true), 'tour')) {
+        out.insertBefore(el('div', 'dim', POLL_GAVE_UP), out.firstChild);
+      }
+    } else pollDone('tour');
   } catch (e) {
     out.className = '';
     showError(out, e);
@@ -1609,8 +1616,11 @@ async function loadWards(recompute, quiet) {
     out.className = '';
     renderWards(out, data);
     drawWards();
-    if (data.pending) pollLater(() => token === ward.token && loadWards(false, true), 'wards');
-    else pollDone('wards');
+    if (data.pending) {
+      if (!pollLater(() => token === ward.token && loadWards(false, true), 'wards')) {
+        out.appendChild(el('div', 'dim', POLL_GAVE_UP));
+      }
+    } else pollDone('wards');
   } catch (e) {
     if (token === ward.token) { out.className = ''; showError(out, e); }
   }

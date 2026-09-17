@@ -2,6 +2,7 @@
 #   app/data/stratz_fallback.json.gz      - матчапы, синергии, позиции STRATZ
 #   app/data/tournament_fallback.json.gz  - турнирная статистика OpenDota
 #   app/data/builds_fallback.json.gz      - сборки и прокачка героев по турнирам
+#   app/data/wards_fallback.json.gz       - тепловая карта вардов по турнирам
 #
 # Зачем снимки: подбор во время пика не должен ждать сеть - ни STRATZ
 # (токен на пользователя, лимиты, привязка к IP), ни базу OpenDota
@@ -52,12 +53,16 @@ jobs:
         timeout-minutes: 90
         run: python3 app/tools/update_builds.py
 
+      - name: Снимок вардов
+        continue-on-error: true
+        run: python3 app/tools/update_wards.py
+
       - name: Закоммитить, если изменилось
         id: commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/data/stratz_fallback.json.gz app/data/tournament_fallback.json.gz app/data/builds_fallback.json.gz
+          git add app/data/stratz_fallback.json.gz app/data/tournament_fallback.json.gz app/data/builds_fallback.json.gz app/data/wards_fallback.json.gz
           if git diff --cached --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else

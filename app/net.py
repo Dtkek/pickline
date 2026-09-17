@@ -138,6 +138,43 @@ def _fetch_curl(url, timeout):
 # после таких кодов вторая попытка через паузу обычно проходит
 RETRY_CODES = {429, 500, 502, 503, 504}
 
+# Предохранитель по хосту. На канале, где рукопожатие с OpenDota рвётся,
+# каждый запрос честно проходил все повторы (urllib, curl, пауза, снова),
+# а запрос к базе - ещё и четыре попытки сверху: вкладка «считала» по
+# 3-5 минут, прежде чем сказать, что сети нет. После двух обрывов подряд
+# хост считается недоступным HOST_PAUSE секунд, и все запросы к нему
+# отваливаются сразу - с копией из кэша или понятной ошибкой.
+HOST_FAILS_TO_TRIP = 2
+HOST_PAUSE = 3 * 60
+_host_state = {}   # хост -> {"fails": подряд неудач, "until": до какого времени не ходить}
+_host_lock = threading.Lock()
+
+
+def _host(url):
+    return url.split("//", 1)[-1].split("/", 1)[0]
+
+
+def host_paused(url):
+    """Сколько секунд хост ещё считается недоступным (0 - можно пробовать)."""
+    with _host_lock:
+        st = _host_state.get(_host(url))
+    return max(0, int(st["until"] - time.time())) if st else 0
+
+
+def _host_failed(url):
+    with _host_lock:
+        st = _host_state.setdefault(_host(url), {"fails": 0, "until": 0})
+        st["fails"] += 1
+        if st["fails"] >= HOST_FAILS_TO_TRIP:
+            st["until"] = time.time() + HOST_PAUSE
+            sys.stderr.write(f"  сеть: {_host(url)} не отвечает {st['fails']} раз подряд, "
+                             f"пауза {HOST_PAUSE // 60} мин\n")
+
+
+def _host_ok(url):
+    with _host_lock:
+        _host_state.pop(_host(url), None)
+
 
 def get_json(url, ttl=3600, timeout=45, stale_ok=True):
     """Забирает JSON по url. ttl — сколько секунд кэш считается свежим.
@@ -154,18 +191,23 @@ def get_json(url, ttl=3600, timeout=45, stale_ok=True):
         return cached
 
     error = None
+    paused = host_paused(url)
+    if paused:
+        error = RuntimeError(f"{_host(url)} не отвечает, следующая попытка через {paused} с")
     order = (_fetch_curl, _fetch_urllib) if _use_curl else (_fetch_urllib, _fetch_curl)
-    for attempt in range(2):
+    for attempt in range(0 if paused else 2):
         for fetch in order:
             try:
                 data = fetch(url, timeout)
                 _use_curl = fetch is _fetch_curl
                 _write_cache(url, data)
                 _last_error.pop(url, None)
+                _host_ok(url)
                 return data
             except HttpStatusError as e:
                 # сервер ответил - вторым способом ответ будет тот же
                 error = e
+                _host_ok(url)
                 break
             except Exception as e:  # noqa: BLE001 — сбой соединения: пробуем запасной путь
                 error = e
@@ -174,6 +216,8 @@ def get_json(url, ttl=3600, timeout=45, stale_ok=True):
             break
         if attempt == 0:
             time.sleep(2.5)
+    if error is not None and not paused and not isinstance(error, HttpStatusError):
+        _host_failed(url)
 
     if stale_ok:
         stale = _read_cache(url, ttl=None)
@@ -201,6 +245,8 @@ def describe_error(error):
     low = text.lower()
     if "schannel" in low or "ssl/tls" in low or "handshake" in low or "ssl:" in low:
         return "SSL/TLS-соединение не установилось (обрыв сети или VPN)"
+    if "следующая попытка через" in low:
+        return text
     if "timed out" in low or "timeout" in low:
         return "сервер не ответил вовремя (медленный канал)"
     if "could not resolve" in low or "getaddrinfo" in low or "name or service" in low:
