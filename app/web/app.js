@@ -1014,7 +1014,7 @@ $('#gsi-install').addEventListener('click', async () => {
 });
 
 // ---------------------------------------------------------------- чтение экрана
-const vision = { timer: null, running: false, lastKey: '', lastState: null, lastScans: 0 };
+const vision = { timer: null, running: false, auto: false, lastKey: '', lastState: null, lastScans: 0 };
 
 async function visionBoot() {
   const box = $('#vision-status');
@@ -1031,7 +1031,11 @@ async function visionBoot() {
     if (st.config) {
       $('#vis-monitor').value = String(st.config.monitor);
       $('#vis-interval').value = String(st.config.interval);
+      $('#vis-auto').checked = !!st.config.auto;
+      vision.auto = !!st.config.auto;
+      if (vision.auto) startVisionPolling();
     }
+    $('#vis-auto-note').textContent = st.auto_note || '';
     const ic = st.icons;
     const loaded = st.templates_loaded;
     if (ic.ready && loaded !== undefined && loaded < ic.have) {
@@ -1053,18 +1057,42 @@ async function visionBoot() {
   }
 }
 
-async function visionConfig() {
+async function visionConfig(auto) {
   const region = $('#vis-region').value.split(',').map(Number);
-  await api('/api/vision/config', {
+  const body = {
+    monitor: Number($('#vis-monitor').value),
+    interval: Number($('#vis-interval').value),
+    region,
+  };
+  if (auto !== undefined) body.auto = auto;
+  const r = await api('/api/vision/config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      monitor: Number($('#vis-monitor').value),
-      interval: Number($('#vis-interval').value),
-      region,
-    }),
+    body: JSON.stringify(body),
   });
+  if (r.auto_note !== undefined) $('#vis-auto-note').textContent = r.auto_note || '';
+  return r;
 }
+
+// опрос состояния идёт, пока слежение включено руками или стоит авто:
+// в авторежиме сервер сам включит слежение на драфте, а страница
+// должна это увидеть и подставить героев
+function startVisionPolling() {
+  if (vision.timer) return;
+  vision.timer = setInterval(pollVision, 2000);
+}
+
+$('#vis-auto').addEventListener('change', async () => {
+  vision.auto = $('#vis-auto').checked;
+  try {
+    await visionConfig(vision.auto);
+    if (vision.auto) startVisionPolling();
+  } catch (e) { showError($('#vision-out'), e); }
+});
+// смена монитора/области/опроса при включённом авто - сразу в настройки,
+// чтобы авторежим включал слежение уже с ними
+['#vis-monitor', '#vis-region', '#vis-interval'].forEach((sel) =>
+  $(sel).addEventListener('change', () => { if (vision.auto) visionConfig().catch(() => {}); }));
 
 $('#vis-start').addEventListener('click', async () => {
   try {
@@ -1073,14 +1101,13 @@ $('#vis-start').addEventListener('click', async () => {
     if (!r.started && r.state && r.state.last_error) throw new Error(r.state.last_error);
     vision.running = true;
     renderVision(r.state);
-    if (vision.timer) clearInterval(vision.timer);
-    vision.timer = setInterval(pollVision, 2000);
+    startVisionPolling();
   } catch (e) { showError($('#vision-out'), e); }
 });
 
 $('#vis-stop').addEventListener('click', async () => {
   vision.running = false;
-  if (vision.timer) { clearInterval(vision.timer); vision.timer = null; }
+  if (vision.timer && !vision.auto) { clearInterval(vision.timer); vision.timer = null; }
   try { renderVision((await api('/api/vision/stop', { method: 'POST' })).state); }
   catch (e) { showError($('#vision-out'), e); }
 });
@@ -1177,9 +1204,14 @@ $('#vis-icons').addEventListener('click', async (e) => {
 });
 
 async function pollVision() {
-  if (!vision.running) return;
-  try { renderVision(await api('/api/vision/state')); }
-  catch (e) { /* сеть моргнула — ждём следующего опроса */ }
+  if (!vision.running && !vision.auto) return;
+  try {
+    const vs = await api('/api/vision/state');
+    if (vs.auto_note !== undefined) $('#vis-auto-note').textContent = vs.auto_note || '';
+    // в авторежиме слежение включает и выключает сервер
+    if (vision.auto) vision.running = !!vs.running;
+    renderVision(vs);
+  } catch (e) { /* сеть моргнула — ждём следующего опроса */ }
 }
 
 // Стороны делятся по центру экрана. Делить по середине между найденными

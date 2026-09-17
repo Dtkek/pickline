@@ -77,6 +77,103 @@ def get_watcher():
         return _watcher
 
 
+# --- авторежим чтения экрана -------------------------------------------------
+# Игра через GSI сообщает стадию: на DOTA_GAMERULES_STATE_HERO_SELECTION
+# слежение включается само (с последними настройками), после выхода из
+# неё - выключается. Срабатывает по фронту: если пользователь остановил
+# слежение руками посреди драфта, авторежим его не перезапускает до
+# следующего драфта. Без подключения игры авторежиму не на что опираться.
+VISION_SETTINGS = os.path.join(paths.DATA_DIR, "vision_settings.json")
+_vision_settings = None
+_vision_settings_lock = threading.Lock()
+_auto = {"started": False, "last_drafting": None, "note": None}
+
+
+def vision_settings():
+    """Настройки чтения экрана: авто, монитор, интервал, область. Хранятся на диске."""
+    global _vision_settings
+    with _vision_settings_lock:
+        if _vision_settings is None:
+            base = {"auto": False, "monitor": 1, "interval": 3.0, "region": [0.0, 0.0, 1.0, 0.55]}
+            try:
+                with open(VISION_SETTINGS, encoding="utf-8") as f:
+                    base.update(json.load(f))
+            except (OSError, ValueError):
+                pass
+            _vision_settings = base
+        return dict(_vision_settings)
+
+
+def save_vision_settings(**changes):
+    global _vision_settings
+    current = vision_settings()
+    with _vision_settings_lock:
+        current.update({k: v for k, v in changes.items() if v is not None})
+        _vision_settings = current
+        try:
+            os.makedirs(os.path.dirname(VISION_SETTINGS), exist_ok=True)
+            with open(VISION_SETTINGS, "w", encoding="utf-8") as f:
+                json.dump(current, f, ensure_ascii=False)
+        except OSError as e:
+            sys.stderr.write(f"  настройки чтения экрана не сохранились: {e}\n")
+    return dict(current)
+
+
+def _gsi_drafting():
+    s = gsi.state()
+    if not s.get("alive"):
+        return None
+    return s.get("game_state") == "DOTA_GAMERULES_STATE_HERO_SELECTION"
+
+
+def vision_auto_status():
+    """Строка для интерфейса: что авторежим делает сейчас."""
+    st = vision_settings()
+    if not st["auto"]:
+        return None
+    drafting = _gsi_drafting()
+    if drafting is None:
+        return "авто: игра не на связи - подключите Game State Integration, иначе включать нечем"
+    if drafting:
+        return "авто: стадия выбора героев, слежение включено" if _auto["started"] \
+            else "авто: стадия выбора героев (слежение остановлено вручную)"
+    return "авто: жду стадию выбора героев"
+
+
+def vision_auto_tick():
+    """Один шаг авторежима; зовётся из фонового потока каждые 2 с."""
+    st = vision_settings()
+    if not st["auto"] or not vision.AVAILABLE:
+        return
+    drafting = _gsi_drafting()
+    prev = _auto["last_drafting"]
+    _auto["last_drafting"] = drafting
+    w = get_watcher()
+    running = w.state().get("running")
+    if drafting and not prev and not running:
+        w.configure(monitor=st["monitor"], interval=st["interval"], region=st["region"])
+        if w.start():
+            _auto["started"] = True
+            sys.stderr.write("  авто: стадия выбора героев - слежение за экраном включено\n")
+    elif not drafting and prev and _auto["started"]:
+        w.stop()
+        _auto["started"] = False
+        sys.stderr.write("  авто: драфт закончен - слежение за экраном выключено\n")
+    elif not running:
+        _auto["started"] = False
+
+
+def start_vision_auto_thread():
+    def worker():
+        while True:
+            try:
+                vision_auto_tick()
+            except Exception as e:  # noqa: BLE001 - авторежим не должен ронять сервер
+                sys.stderr.write(f"  авто: сбой ({e})\n")
+            time.sleep(2)
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def vision_status():
     """Состояние чтения экрана.
 
@@ -101,8 +198,10 @@ def vision_status():
     if vision.AVAILABLE and have:
         w = get_watcher()
         out["state"] = w.state()
+        saved = vision_settings()
         out["config"] = {"monitor": w.monitor, "interval": w.interval,
-                         "region": list(w.region)}
+                         "region": list(w.region), "auto": saved["auto"]}
+        out["auto_note"] = vision_auto_status()
         # файлов на диске и эталонов в распознавателе может быть разное
         # число: на Windows cv2.imread молчит на путях с кириллицей
         out["templates_loaded"] = len(w.recognizer.ids)
@@ -123,7 +222,7 @@ CDN = "https://cdn.cloudflare.steamstatic.com"
 
 # Версия показывается в консоли и в шапке страницы: когда что-то идёт не так,
 # первым делом нужно понять, какой код на самом деле запущен.
-VERSION = "2026-09-17.2"
+VERSION = "2026-09-17.3"
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -1335,7 +1434,7 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/vision/state":
                 if not vision.AVAILABLE:
                     return self._json({"error": vision.requirements_hint()}, 400)
-                return self._json(get_watcher().state())
+                return self._json(dict(get_watcher().state(), auto_note=vision_auto_status()))
             if url.path == "/api/vision/frame.jpg":
                 # последний захваченный кадр: главный инструмент диагностики,
                 # когда «не распознаёт» — видно, что реально попало в кадр
@@ -1585,9 +1684,18 @@ class Handler(BaseHTTPRequestHandler):
                     w.configure(monitor=data.get("monitor"),
                                 interval=data.get("interval"),
                                 region=data.get("region"))
+                    auto = data.get("auto")
+                    saved = save_vision_settings(
+                        monitor=w.monitor, interval=w.interval, region=list(w.region),
+                        auto=bool(auto) if auto is not None else None)
+                    if auto is not None and not auto and _auto["started"]:
+                        # авторежим выключили - то, что он включил, останавливаем
+                        w.stop()
+                        _auto["started"] = False
                     return self._json({"ok": True, "monitor": w.monitor,
                                        "interval": w.interval,
-                                       "region": list(w.region)})
+                                       "region": list(w.region), "auto": saved["auto"],
+                                       "auto_note": vision_auto_status()})
                 if action == "start":
                     started = w.start()
                     return self._json({"started": started, "state": w.state()})
@@ -1771,6 +1879,8 @@ def main():
     url = f"http://{args.host}:{args.port}"
     say(f"\nPickline запущен: {url}")
     check_update_in_background()
+    if vision.AVAILABLE:
+        start_vision_auto_thread()
 
     # Собственное окно, если есть pywebview и не просили браузер. Сервер
     # уходит в поток, окно занимает главный поток (так требует macOS);
