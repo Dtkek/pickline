@@ -130,7 +130,7 @@ document.querySelectorAll('.tabs .tab[data-view]').forEach((tab) => {
     $('#view-' + tab.dataset.view).classList.add('active');
     if (tab.dataset.view === 'meta') loadMeta();
     if (tab.dataset.view === 'tournaments') loadTournaments();
-    if (tab.dataset.view === 'wards' && !ward.data) loadWards(false);
+    if (tab.dataset.view === 'wards' && !ward.layers.length) loadWards(false);
     if (tab.dataset.view === 'pro') loadProList();
   });
 });
@@ -1569,9 +1569,12 @@ function renderTournaments() {
 // Картинка идёт через сервер (/api/map, кэш); если не скачалась -
 // схема: реки, линии, базы. Данные - как у турниров: памятка или
 // «считается», страница дозапрашивает.
-const ward = { data: null, token: 0, active: -1, img: null, imgFailed: false };
+const ward = { layers: [], token: 0, active: null, img: null, imgFailed: false };
 const MAP_MIN = 64;
 const MAP_SIZE = 128;
+// цвет стороны: Radiant зелёный, Dire красный - и на карте, и в списке
+const SIDE_COLOR = { radiant: '63,185,80', dire: '226,84,74' };
+const SIDE_NAME = { radiant: 'Radiant', dire: 'Dire' };
 
 ['#ward-kind', '#ward-side', '#ward-window', '#ward-hero', '#ward-months', '#ward-tier'].forEach((sel) =>
   $(sel).addEventListener('change', () => loadWards(false)));
@@ -1598,25 +1601,30 @@ function loadMapImage() {
   img.src = '/api/map';
 }
 
+// «обе» стороны - два запроса и два слоя разного цвета; одна - один слой
 async function loadWards(recompute, quiet) {
   const out = $('#ward-out');
   if (!quiet) { out.className = 'loading'; out.textContent = 'Загрузка…'; }
   loadMapImage();
   const token = ++ward.token;
+  const side = $('#ward-side').value;
+  const sides = side === 'both' ? ['radiant', 'dire'] : [side];
   try {
-    const q = new URLSearchParams({
-      kind: $('#ward-kind').value, side: $('#ward-side').value, window: $('#ward-window').value,
-      hero: $('#ward-hero').value, months: $('#ward-months').value, tier: $('#ward-tier').value,
-    });
-    if (recompute) q.set('force', '1');
-    const data = await api('/api/wards?' + q);
+    const layers = await Promise.all(sides.map(async (s) => {
+      const q = new URLSearchParams({
+        kind: $('#ward-kind').value, side: s, window: $('#ward-window').value,
+        hero: $('#ward-hero').value, months: $('#ward-months').value, tier: $('#ward-tier').value,
+      });
+      if (recompute) q.set('force', '1');
+      return { side: s, data: await api('/api/wards?' + q) };
+    }));
     if (token !== ward.token) return;
-    ward.data = data;
-    ward.active = -1;
+    ward.layers = layers;
+    ward.active = null;
     out.className = '';
-    renderWards(out, data);
+    renderWards(out, layers);
     drawWards();
-    if (data.pending) {
+    if (layers.some((l) => l.data.pending)) {
       if (!pollLater(() => token === ward.token && loadWards(false, true), 'wards')) {
         out.appendChild(el('div', 'dim', POLL_GAVE_UP));
       }
@@ -1626,42 +1634,64 @@ async function loadWards(recompute, quiet) {
   }
 }
 
-function renderWards(out, data) {
-  const kindName = data.kind === 'sen' ? 'стражей' : 'обзорных вардов';
-  const sideName = { radiant: 'Radiant', dire: 'Dire', both: 'обеих сторон' }[data.side] || data.side;
-  const hero = data.hero_id ? (state.byId.get(data.hero_id) || {}).name : null;
-  const per = data.total_matches ? (data.wards / data.total_matches).toFixed(1) : '0';
-  $('#ward-summary').textContent = data.total_matches
-    ? `${data.wards} ${kindName} ${sideName}${hero ? ` (${hero})` : ''} в ${data.total_matches} матчах, ` +
-      `минуты ${data.from < 0 ? 'до рога' : data.from}–${data.to >= 180 ? 'конец' : data.to}: ` +
-      `в среднем ${per} за матч.`
+function renderWards(out, layers) {
+  const first = layers[0].data;
+  const kindName = first.kind === 'sen' ? 'стражей' : 'обзорных вардов';
+  const hero = first.hero_id ? (state.byId.get(first.hero_id) || {}).name : null;
+  const parts = layers.filter((l) => l.data.total_matches).map((l) =>
+    `${SIDE_NAME[l.side]}: ${l.data.wards}, в среднем ${(l.data.wards / l.data.total_matches).toFixed(1)} за матч`);
+  $('#ward-summary').textContent = parts.length
+    ? `${kindName[0].toUpperCase() + kindName.slice(1)}${hero ? ` (${hero})` : ''} в ${first.total_matches} матчах, ` +
+      `минуты ${first.from < 0 ? 'до рога' : first.from}–${first.to >= 180 ? 'конец' : first.to} — ` +
+      parts.join('; ') + '.'
     : '';
   out.innerHTML = '';
-  if (data.note) out.appendChild(el('div', data.pending || !/не отвечает/.test(data.note) ? 'dim' : 'error', data.note));
-  if (!data.spots.length) {
-    out.appendChild(el('div', 'empty-hint', data.pending ? 'Считаю по базе турнирных матчей…' : 'Вардов за период нет.'));
-    return;
+  // пометка одна на все слои: источник у них один
+  const noted = layers.find((l) => l.data.note);
+  if (noted) {
+    const n = noted.data.note;
+    out.appendChild(el('div', noted.data.pending || !/не отвечает/.test(n) ? 'dim' : 'error', n));
   }
-  const max = data.spots[0].n || 1;
-  data.spots.forEach((s, i) => {
-    const row = el('div', 'ward-spot');
-    row.appendChild(el('span', 'num', String(i + 1)));
-    const txt = el('div');
-    txt.style.minWidth = '120px';
-    txt.appendChild(el('div', '', `${s.n} шт. · ${data.total_matches ? Math.round(s.matches / data.total_matches * 100) : 0}% матчей`));
-    txt.appendChild(el('div', 'dim', `клетка ${s.x}, ${s.y}`));
-    row.appendChild(txt);
-    const bar = el('div', 'bar');
-    const fill = el('i');
-    fill.style.width = Math.round(s.n / max * 100) + '%';
-    bar.appendChild(fill);
-    row.appendChild(bar);
-    row.addEventListener('click', () => {
-      ward.active = ward.active === i ? -1 : i;
-      out.querySelectorAll('.ward-spot').forEach((r, j) => r.classList.toggle('active', j === ward.active));
-      drawWards();
+  if (layers.length > 1) {
+    out.appendChild(el('div', 'dim', 'Зелёные точки — Radiant, красные — Dire.'));
+  }
+  layers.forEach((l) => {
+    const data = l.data;
+    if (layers.length > 1) {
+      const h = el('div', 'skills-sub', SIDE_NAME[l.side]);
+      h.style.color = `rgb(${SIDE_COLOR[l.side]})`;
+      out.appendChild(h);
+    }
+    if (!data.spots.length) {
+      out.appendChild(el('div', 'empty-hint', data.pending ? 'Считаю по базе турнирных матчей…' : 'Вардов за период нет.'));
+      return;
+    }
+    const max = data.spots[0].n || 1;
+    data.spots.forEach((s, i) => {
+      const row = el('div', 'ward-spot');
+      const num = el('span', 'num', String(i + 1));
+      num.style.background = `rgb(${SIDE_COLOR[l.side]})`;
+      row.appendChild(num);
+      const txt = el('div');
+      txt.style.minWidth = '120px';
+      txt.appendChild(el('div', '', `${s.n} шт. · ${data.total_matches ? Math.round(s.matches / data.total_matches * 100) : 0}% матчей`));
+      txt.appendChild(el('div', 'dim', `клетка ${s.x}, ${s.y}`));
+      row.appendChild(txt);
+      const bar = el('div', 'bar');
+      const fill = el('i');
+      fill.style.width = Math.round(s.n / max * 100) + '%';
+      fill.style.background = `rgb(${SIDE_COLOR[l.side]})`;
+      bar.appendChild(fill);
+      row.appendChild(bar);
+      row.addEventListener('click', () => {
+        const key = l.side + ':' + i;
+        ward.active = ward.active === key ? null : key;
+        out.querySelectorAll('.ward-spot').forEach((r) => r.classList.toggle('active', r.dataset.key === ward.active));
+        drawWards();
+      });
+      row.dataset.key = l.side + ':' + i;
+      out.appendChild(row);
     });
-    out.appendChild(row);
   });
 }
 
@@ -1701,34 +1731,39 @@ function drawWards() {
   ctx.clearRect(0, 0, size, size);
   if (ward.img) ctx.drawImage(ward.img, 0, 0, size, size);
   else drawMapSchematic(ctx, size);
-  const data = ward.data;
-  if (!data || !data.cells.length) return;
-  const max = data.cells[0].n || 1;
-  const color = data.kind === 'sen' ? '90,160,255' : '255,200,40';
-  // тепло: круг с прозрачностью по частоте; радиус - две клетки
+  // тепло: круг с прозрачностью по частоте, цвет - сторона; радиус - две клетки
   const r = size / MAP_SIZE * 2.2;
-  data.cells.forEach((c) => {
-    const [px, py] = wardXY(c.x, c.y, size);
-    const a = 0.15 + 0.7 * Math.sqrt(c.n / max);
-    const g = ctx.createRadialGradient(px, py, 0, px, py, r);
-    g.addColorStop(0, `rgba(${color},${a})`);
-    g.addColorStop(1, `rgba(${color},0)`);
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+  ward.layers.forEach((l) => {
+    const data = l.data;
+    if (!data.cells.length) return;
+    const max = data.cells[0].n || 1;
+    const color = SIDE_COLOR[l.side];
+    data.cells.forEach((c) => {
+      const [px, py] = wardXY(c.x, c.y, size);
+      const a = 0.15 + 0.7 * Math.sqrt(c.n / max);
+      const g = ctx.createRadialGradient(px, py, 0, px, py, r);
+      g.addColorStop(0, `rgba(${color},${a})`);
+      g.addColorStop(1, `rgba(${color},0)`);
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+    });
   });
-  // номера точек
-  data.spots.forEach((s, i) => {
-    const [px, py] = wardXY(s.x, s.y, size);
-    const active = i === ward.active;
-    const rr = active ? size * 0.024 : size * 0.016;
-    ctx.beginPath(); ctx.arc(px, py, rr, 0, Math.PI * 2);
-    ctx.fillStyle = active ? '#fff' : 'rgba(232,122,33,.95)';
-    ctx.fill();
-    ctx.lineWidth = 2; ctx.strokeStyle = active ? '#e87a21' : 'rgba(0,0,0,.6)'; ctx.stroke();
-    ctx.fillStyle = active ? '#e87a21' : '#fff';
-    ctx.font = `bold ${Math.round(rr * 1.2)}px sans-serif`;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(String(i + 1), px, py + 1);
+  // номера точек - поверх всего тепла, цветом стороны
+  ward.layers.forEach((l) => {
+    const color = SIDE_COLOR[l.side];
+    l.data.spots.forEach((s, i) => {
+      const [px, py] = wardXY(s.x, s.y, size);
+      const active = ward.active === l.side + ':' + i;
+      const rr = active ? size * 0.024 : size * 0.016;
+      ctx.beginPath(); ctx.arc(px, py, rr, 0, Math.PI * 2);
+      ctx.fillStyle = active ? '#fff' : `rgba(${color},.95)`;
+      ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = active ? `rgb(${color})` : 'rgba(0,0,0,.6)'; ctx.stroke();
+      ctx.fillStyle = active ? `rgb(${color})` : '#fff';
+      ctx.font = `bold ${Math.round(rr * 1.2)}px sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(String(i + 1), px, py + 1);
+    });
   });
 }
 
