@@ -11,22 +11,18 @@ import json
 import os
 
 import net
+import paths
 from net import get_json
 from sources.base import HeroSource
 
 API = "https://api.opendota.com/api"
 
-FALLBACK = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "data", "herostats_fallback.json.gz")
-
-MATCHUPS_FALLBACK = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "data", "matchups_fallback.json.gz")
-
-ITEMS_FALLBACK = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "data", "items_fallback.json.gz")
+# имена снимков; файл - через paths.data_file: обновлённая с GitHub копия
+# (snapshots.py) или та, что приехала в сборке
+FALLBACK = "herostats_fallback.json.gz"
+MATCHUPS_FALLBACK = "matchups_fallback.json.gz"
+ITEMS_FALLBACK = "items_fallback.json.gz"
+ABILITIES_FALLBACK = "abilities_fallback.json.gz"
 
 _fallback_cache = None
 fallback_date = None
@@ -35,9 +31,11 @@ matchups_date = None
 _items_cache = None
 _abilities_cache = None
 
-ABILITIES_FALLBACK = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "data", "abilities_fallback.json.gz")
+
+def reset_snapshot_caches():
+    """Сброс кэшей снимков - после того как snapshots.py скачал свежие с GitHub."""
+    global _fallback_cache, _matchups_cache, _items_cache, _abilities_cache
+    _fallback_cache = _matchups_cache = _items_cache = _abilities_cache = None
 
 
 def _load_abilities():
@@ -45,7 +43,7 @@ def _load_abilities():
     if _abilities_cache is not None:
         return _abilities_cache
     try:
-        with gzip.open(ABILITIES_FALLBACK, "rt", encoding="utf-8") as f:
+        with gzip.open(paths.data_file(ABILITIES_FALLBACK), "rt", encoding="utf-8") as f:
             payload = json.load(f)
         _abilities_cache = {
             "ids": payload.get("ids") or {},
@@ -62,7 +60,7 @@ def _load_items():
     if _items_cache is not None:
         return _items_cache
     try:
-        with gzip.open(ITEMS_FALLBACK, "rt", encoding="utf-8") as f:
+        with gzip.open(paths.data_file(ITEMS_FALLBACK), "rt", encoding="utf-8") as f:
             _items_cache = json.load(f).get("items") or {}
     except (OSError, ValueError):
         _items_cache = {}
@@ -75,7 +73,7 @@ def _load_matchups():
     if _matchups_cache is not None:
         return _matchups_cache
     try:
-        with gzip.open(MATCHUPS_FALLBACK, "rt", encoding="utf-8") as f:
+        with gzip.open(paths.data_file(MATCHUPS_FALLBACK), "rt", encoding="utf-8") as f:
             payload = json.load(f)
     except (OSError, ValueError):
         _matchups_cache = {}
@@ -91,7 +89,7 @@ def _load_fallback():
     if _fallback_cache is not None:
         return _fallback_cache
     try:
-        with gzip.open(FALLBACK, "rt", encoding="utf-8") as f:
+        with gzip.open(paths.data_file(FALLBACK), "rt", encoding="utf-8") as f:
             payload = json.load(f)
     except (OSError, ValueError):
         return None

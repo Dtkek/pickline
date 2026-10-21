@@ -222,7 +222,7 @@ CDN = "https://cdn.cloudflare.steamstatic.com"
 
 # Версия показывается в консоли и в шапке страницы: когда что-то идёт не так,
 # первым делом нужно понять, какой код на самом деле запущен.
-VERSION = "2026-09-17.3"
+VERSION = "2026-10-21.1"
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -394,8 +394,8 @@ def meta_table(source, bracket, role=None, allowed_ids=None):
     return rows
 
 
-TOUR_SNAPSHOT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "data", "tournament_fallback.json.gz")
+# имя снимка; файл - через paths.data_file: обновлённая с GitHub копия или из сборки
+TOUR_SNAPSHOT = "tournament_fallback.json.gz"
 # турнирная статистика свежая столько же, сколько кэш её запросов к базе
 TOUR_FRESH = 6 * 3600
 # устаревшая памятка старше этого не используется - лучше снимок из репозитория
@@ -412,13 +412,19 @@ def tournament_snapshot():
         return _tour_snapshot_cache
     try:
         import gzip
-        with gzip.open(TOUR_SNAPSHOT, "rt", encoding="utf-8") as f:
+        with gzip.open(paths.data_file(TOUR_SNAPSHOT), "rt", encoding="utf-8") as f:
             payload = json.load(f)
         _tour_snapshot_cache = payload.get("stats") or {}
         tour_snapshot_date = payload.get("снято")
     except (OSError, ValueError):
         _tour_snapshot_cache = {}
     return _tour_snapshot_cache
+
+
+def reset_snapshot_caches():
+    """Сброс кэшей снимков - после того как snapshots.py скачал свежие с GitHub."""
+    global _tour_snapshot_cache, _builds_snapshot_cache, _wards_snapshot_cache
+    _tour_snapshot_cache = _builds_snapshot_cache = _wards_snapshot_cache = None
 
 
 def tournament_fast(source, months=3, tier="top", leagueid=None, wait=False):
@@ -955,8 +961,7 @@ def hero_build(source, hero_id, months=3, enemy_ids=None, tier="top", general_ro
 # OpenDota рвётся, живой запрос шёл минуты и заканчивался ошибкой; снимок
 # показывает общую сборку сразу, а живая подменяет её, когда доходит.
 
-BUILDS_SNAPSHOT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "data", "builds_fallback.json.gz")
+BUILDS_SNAPSHOT = "builds_fallback.json.gz"
 _builds_snapshot_cache = None
 
 
@@ -966,7 +971,7 @@ def builds_snapshot():
     if _builds_snapshot_cache is None:
         try:
             import gzip
-            with gzip.open(BUILDS_SNAPSHOT, "rt", encoding="utf-8") as f:
+            with gzip.open(paths.data_file(BUILDS_SNAPSHOT), "rt", encoding="utf-8") as f:
                 _builds_snapshot_cache = json.load(f)
         except (OSError, ValueError):
             _builds_snapshot_cache = {}
@@ -1103,8 +1108,7 @@ def ward_spots(rows, radius=2, limit=12):
     return spots[:limit]
 
 
-WARDS_SNAPSHOT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              "data", "wards_fallback.json.gz")
+WARDS_SNAPSHOT = "wards_fallback.json.gz"
 _wards_snapshot_cache = None
 
 
@@ -1114,7 +1118,7 @@ def wards_snapshot():
     if _wards_snapshot_cache is None:
         try:
             import gzip
-            with gzip.open(WARDS_SNAPSHOT, "rt", encoding="utf-8") as f:
+            with gzip.open(paths.data_file(WARDS_SNAPSHOT), "rt", encoding="utf-8") as f:
                 _wards_snapshot_cache = json.load(f)
         except (OSError, ValueError):
             _wards_snapshot_cache = {}
@@ -1834,6 +1838,12 @@ def main():
 
     src = get_source()
     say(f"Pickline, версия {VERSION}. Источник данных: {src.name}.")
+    # свежие снимки с GitHub в фоне: работают и там, где OpenDota не открывается
+    import snapshots
+    from sources import opendota as _od
+    snapshots.on_update(reset_snapshot_caches)
+    snapshots.on_update(_od.reset_snapshot_caches)
+    snapshots.start_in_background(say)
     say("  приоритет процесса понижен: игра важнее"
         if lower_priority() else "  приоритет процесса понизить не удалось")
     try:
