@@ -364,6 +364,7 @@ function renderSlots() {
 
 let recToken = 0;
 async function refreshRecommendations() {
+  updateDraftAlerts();
   // сборка зависит от врагов: поменялся драфт - пересчитать и её
   const enemyKey = state.draft.enemy.slice().sort().join(',');
   if (me.heroId && enemyKey !== me.lastEnemyKey) {
@@ -928,6 +929,7 @@ $('#personal-weight').addEventListener('change', refreshRecommendations);
 async function pollGsi() {
   try {
     const s = await api('/api/gsi/state');
+    draftTimer(s);
     const box = $('#gsi-status');
     if (!s.received) {
       box.textContent = 'не подключена';
@@ -2090,5 +2092,154 @@ async function checkUpdate(attempt) {
   } catch (e) { /* без сети - без обновлений, это не ошибка */ }
 }
 setTimeout(() => checkUpdate(0), 6000);
+
+// ------------------------------------------------- подсказки по драфту врага
+// Короткий совет, когда враг берёт героя, против которого нужно что-то
+// конкретное, и напоминание за 10 секунд до конца выбора. Текстом - всегда,
+// голосом - если включено (Web Speech API окна; русского голоса может не
+// быть - тогда короткий сигнал). Ключ - id героя в Dota.
+const THREATS = {
+  33: 'Энигма: Black Hole по площади — не стойте кучей, нужен BKB или прерывание.',
+  97: 'Магнус: Reverse Polarity — в драке держитесь врозь, полезен Force Staff.',
+  29: 'Тайдхантер: Ravage по площади — расходитесь в драках, полезен BKB.',
+  41: 'Войд: Chronosphere — нужен сейв или героев с выходом из хроны.',
+  7: 'Эршейкер: Echo Slam — не стойте кучей у крипов и иллюзий.',
+  59: 'Хускар: нужен антихил — Spirit Vessel или Eye of Skadi.',
+  36: 'Некрофос: нужен антихил — Spirit Vessel или Eye of Skadi.',
+  54: 'Лайфстилер: магия по нему не работает в Rage — нужен физический урон и антихил.',
+  44: 'Фантом Ассасин: уклонение — нужен Monkey King Bar.',
+  12: 'Фантом Лансер: иллюзии — нужен урон по площади.',
+  89: 'Нага: иллюзии и сон — нужен урон по площади.',
+  109: 'Террорблейд: иллюзии — нужен урон по площади и давление рано.',
+  82: 'Мипо: давите рано и берите урон по площади.',
+  113: 'Арк Варден: сильно пушит — нужно давление по линиям рано.',
+  99: 'Бристлбек: нужен Silver Edge, чтобы снять пассивку.',
+  67: 'Спектр: опасна в поздней игре — давите рано.',
+  73: 'Алхимик: быстро фармит — давите его рано.',
+  94: 'Медуза: опасна в поздней игре — давите рано, полезно сжигание маны.',
+  70: 'Урса: держите дистанцию — Ghost Scepter или Eul\'s.',
+  95: 'Тролль: нужен контроль сквозь BKB.',
+  93: 'Сларк: под ультой его не видно даже с сентри — нужен контроль и урон по площади.',
+  14: 'Пудж: держите крипов между собой и ним — хуки.',
+  75: 'Сайленсер: глобальное молчание — берите Lotus или героев без нажатий.',
+  1: 'Антимаг: жжёт ману — не полагайтесь на долгую магию, давите рано.',
+  10: 'Морфлинг: нужен контроль и урон по площади, давите рано.',
+};
+// невидимые герои: когда ставить сентри (окно карты вардов) и как сказать
+const INVIS = {
+  32: { when: 'с начала игры', window: 'early' },     // Riki
+  62: { when: 'с начала игры', window: 'early' },     // Bounty Hunter
+  63: { when: 'с начала игры', window: 'early' },     // Weaver
+  56: { when: 'с начала игры', window: 'early' },     // Clinkz
+  46: { when: 'с начала игры', window: 'early' },     // Templar Assassin
+  83: { when: 'с начала игры, у деревьев', window: 'early' },  // Treant Protector
+  16: { when: 'с начала игры, в Sand Storm', window: 'early' },  // Sand King
+  61: { when: 'с начала игры, в паутине', window: 'early' },     // Broodmother
+  88: { when: 'после 6 уровня (ульта)', window: 'lane' },        // Nyx Assassin
+  9: { when: 'после 6 уровня (ульта)', window: 'lane' },         // Mirana
+  74: { when: 'когда прокачает Ghost Walk', window: 'lane' },    // Invoker
+};
+
+const voice = { on: false, spokenEnemies: new Set(), lastTime: null };
+try { voice.on = localStorage.getItem('voice-on') === '1'; } catch (e) { /* без хранилища */ }
+$('#voice-on').checked = voice.on;
+$('#voice-on').addEventListener('change', (e) => {
+  voice.on = e.target.checked;
+  try { localStorage.setItem('voice-on', voice.on ? '1' : '0'); } catch (err) { /* ничего */ }
+  if (voice.on) say('Голосовые подсказки включены.');
+});
+$('#voice-test').addEventListener('click', () => say('Враг взял Энигму: не стойте кучей, нужен BKB.', true));
+
+function beep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.frequency.value = 880;
+    g.gain.value = 0.15;
+    o.connect(g).connect(ctx.destination);
+    o.start();
+    o.stop(ctx.currentTime + 0.18);
+  } catch (e) { /* без звука */ }
+}
+
+function say(text, force) {
+  if (!voice.on && !force) return;
+  const synth = window.speechSynthesis;
+  const ru = synth && synth.getVoices().find((v) => (v.lang || '').toLowerCase().startsWith('ru'));
+  if (!synth || !ru) { beep(); return; }   // нет русского голоса - хотя бы сигнал
+  const u = new SpeechSynthesisUtterance(text);
+  u.voice = ru;
+  u.lang = ru.lang;
+  u.rate = 1.15;
+  synth.speak(u);
+}
+// голоса в WebView подгружаются не сразу
+if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = () => {};
+
+function heroName(id) { return (state.byId.get(id) || {}).name || ('#' + id); }
+
+function updateDraftAlerts() {
+  const box = $('#draft-alerts');
+  const enemy = state.draft.enemy;
+  const lines = [];
+  enemy.forEach((id) => {
+    if (THREATS[id]) lines.push(THREATS[id]);
+    if (INVIS[id]) lines.push(`${heroName(id)} — невидимость ${INVIS[id].when}: нужны сентри и Dust (места — вкладка «Варды»).`);
+  });
+  const invis = enemy.filter((id) => INVIS[id]);
+  if (invis.length >= 2) lines.push(`У врага ${invis.length} невидимых героя — к середине игры нужен Gem.`);
+  box.innerHTML = '';
+  if (!lines.length) {
+    box.className = 'empty-hint';
+    box.textContent = enemy.length ? 'Особых угроз в драфте врага нет.' : 'Подсказки появятся, когда добавите героев противника.';
+  } else {
+    box.className = '';
+    lines.forEach((t) => box.appendChild(el('div', 'alert-line', '• ' + t)));
+  }
+  // озвучить только новых врагов, а не весь список заново
+  enemy.forEach((id) => {
+    if (voice.spokenEnemies.has(id)) return;
+    voice.spokenEnemies.add(id);
+    if (THREATS[id]) say(THREATS[id]);
+    else if (INVIS[id]) say(`Враг взял ${heroName(id)}: невидимость — нужны сентри.`);
+  });
+  // драфт очистили - можно озвучивать заново
+  [...voice.spokenEnemies].forEach((id) => { if (!enemy.includes(id)) voice.spokenEnemies.delete(id); });
+  renderInvisPanel();
+}
+
+// таймер выбора из GSI: напомнить один раз, когда у нашей команды осталось 10 с
+function draftTimer(s) {
+  const t = s.draft_time_remaining;
+  const ours = s.team && s.draft_active_team === (s.team === 'radiant' ? 2 : 3);
+  if (typeof t !== 'number' || !ours || s.game_state !== 'DOTA_GAMERULES_STATE_HERO_SELECTION') {
+    voice.lastTime = null;
+    return;
+  }
+  if (voice.lastTime !== null && voice.lastTime > 10 && t <= 10 && t > 0) say('Осталось десять секунд на выбор.');
+  voice.lastTime = t;
+}
+
+// вкладка «Варды»: невидимые герои врага и кнопка «показать места сентри»
+function renderInvisPanel() {
+  const box = $('#ward-invis');
+  const invis = state.draft.enemy.filter((id) => INVIS[id]);
+  if (!invis.length) { box.hidden = true; return; }
+  box.hidden = false;
+  box.innerHTML = '';
+  box.appendChild(el('div', 'skills-sub', 'Невидимые герои у врага'));
+  invis.forEach((id) => box.appendChild(el('div', 'alert-line', `• ${heroName(id)} — ${INVIS[id].when}`)));
+  const earliest = invis.some((id) => INVIS[id].window === 'early') ? 'early' : 'lane';
+  const btn = el('button', 'tab', 'Показать, где про-игроки ставят сентри');
+  btn.type = 'button';
+  btn.addEventListener('click', () => {
+    $('#ward-kind').value = 'sen';
+    $('#ward-window').value = earliest;
+    if (me.gsiTeam) $('#ward-side').value = me.gsiTeam;   // сентри ставит своя сторона
+    loadWards(false);
+  });
+  box.appendChild(btn);
+}
 
 boot();

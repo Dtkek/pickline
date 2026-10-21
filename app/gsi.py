@@ -19,6 +19,8 @@
   player.name, player.steamid
   hero.name                 - "npc_dota_hero_nevermore" (появляется после выбора)
   hero.id
+  draft.activeteam, draft.activeteam_time_remaining, draft.radiant_bonus_time,
+  draft.dire_bonus_time      - чья очередь в драфте и сколько секунд осталось
 """
 import os
 import threading
@@ -39,7 +41,15 @@ _state = {
     # полосе драфта ваш. Вживую в драфте не проверено - см. лог
     "team_slot": None,
     "player_slot": None,
+    # блок draft: чья очередь и сколько секунд осталось на выбор. Valve
+    # шлёт его точно наблюдателям; присылает ли игроку в его драфте - вживую
+    # не проверено, первое сообщение пишется в лог
+    "draft_active_team": None,       # 2 - Radiant, 3 - Dire
+    "draft_time_remaining": None,
+    "draft_bonus_time": None,        # резерв той команды, чья очередь
+    "draft_at": None,
 }
+_draft_block_logged = False
 
 # что игра присылает в блоке player на стадии выбора героя: пишется в лог
 # один раз за запуск, чтобы узнать, есть ли там номер слота
@@ -75,7 +85,8 @@ def handle(payload):
     """Обновляет состояние по присланному игрой JSON."""
     if not isinstance(payload, dict):
         return
-    global _draft_player_logged
+    global _draft_player_logged, _draft_block_logged
+    draft = payload.get("draft") or {}
     hero = payload.get("hero") or {}
     player = payload.get("player") or {}
     game_map = payload.get("map") or {}
@@ -102,6 +113,23 @@ def handle(payload):
             import sys
             sys.stderr.write("  GSI: блок player на стадии выбора героя: "
                              + json.dumps(player, ensure_ascii=False)[:600] + "\n")
+        # таймер выбора из блока draft (если игра его присылает)
+        if isinstance(draft, dict) and draft:
+            if not _draft_block_logged:
+                _draft_block_logged = True
+                import json
+                import sys
+                sys.stderr.write("  GSI: блок draft: "
+                                 + json.dumps(draft, ensure_ascii=False)[:600] + "\n")
+            active = draft.get("activeteam")
+            if active is not None:
+                _state["draft_active_team"] = active
+                _state["draft_time_remaining"] = draft.get("activeteam_time_remaining")
+                bonus_key = "radiant_bonus_time" if active == 2 else "dire_bonus_time"
+                _state["draft_bonus_time"] = draft.get(bonus_key)
+                _state["draft_at"] = time.time()
+        elif game_map.get("game_state") != "DOTA_GAMERULES_STATE_HERO_SELECTION":
+            _state["draft_time_remaining"] = None
         # герой появляется, когда выбран; между играми блок пустой
         if hero.get("name"):
             _state["hero_name"] = hero["name"]

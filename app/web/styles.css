@@ -291,3 +291,6 @@ tr.open td { border-bottom-color: transparent; }
   margin-bottom: 12px;
 }
 .loading { color: var(--muted); padding: 12px 0; }
+
+/* подсказки по драфту врага */
+.alert-line { font-size: 13px; line-height: 1.45; margin: 3px 0; }

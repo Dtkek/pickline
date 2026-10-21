@@ -127,6 +127,21 @@
         </div>
 
         <div class="card">
+          <h2>Подсказки по драфту врага</h2>
+          <div class="controls">
+            <label style="display:flex;gap:8px;align-items:center">
+              <input type="checkbox" id="voice-on"> Озвучивать голосом
+            </label>
+            <button type="button" class="tab" id="voice-test">Проверить звук</button>
+          </div>
+          <div class="dim" style="margin:4px 0 8px">
+            Когда враг берёт опасного героя — короткий совет; за 10 секунд до конца
+            вашего выбора — напоминание (таймер из игры, нужно «Подключить игру»).
+          </div>
+          <div id="draft-alerts" class="empty-hint">Подсказки появятся, когда добавите героев противника.</div>
+        </div>
+
+        <div class="card">
           <h2>Выбор героя</h2>
           <input type="text" id="hero-search" placeholder="Начните вводить имя героя…" autocomplete="off">
           <div class="hero-grid" id="hero-grid" style="margin-top:10px"></div>
@@ -317,6 +332,7 @@
         Ярче — чаще; зелёное — Radiant, красное — Dire; номера — самые частые точки, список справа.
         Клик по точке в списке подсвечивает её на карте.
       </div>
+      <div id="ward-invis" hidden style="margin-bottom:10px"></div>
       <div id="ward-summary" class="dim" style="margin-bottom:8px"></div>
       <div class="row">
         <div class="ward-map-box"><canvas id="ward-map" width="720" height="720"></canvas></div>
