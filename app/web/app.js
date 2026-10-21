@@ -2199,19 +2199,53 @@ function beep() {
   } catch (e) { /* без звука */ }
 }
 
+// русские голоса системы, лучшие первыми: нейросетевые (Natural / Neural /
+// Online) звучат живо, классические (Irina, Pavel) - роботом
+function ruVoices() {
+  const synth = window.speechSynthesis;
+  if (!synth) return [];
+  const score = (v) => (/natural|neural|online/i.test(v.name) ? 0 : 1);
+  return synth.getVoices()
+    .filter((v) => (v.lang || '').toLowerCase().startsWith('ru'))
+    .sort((a, b) => score(a) - score(b) || a.name.localeCompare(b.name));
+}
+function pickedVoice() {
+  const list = ruVoices();
+  let want = '';
+  try { want = localStorage.getItem('voice-name') || ''; } catch (e) { /* ничего */ }
+  return list.find((v) => v.name === want) || list[0] || null;
+}
+function fillVoiceSelect() {
+  const sel = $('#voice-pick');
+  const list = ruVoices();
+  let want = '';
+  try { want = localStorage.getItem('voice-name') || ''; } catch (e) { /* ничего */ }
+  sel.innerHTML = '';
+  sel.appendChild(new Option(list.length ? '— авто: ' + list[0].name + ' —' : 'русских голосов нет — будет сигнал', ''));
+  list.forEach((v) => sel.appendChild(new Option(v.name, v.name, false, v.name === want)));
+}
+$('#voice-pick').addEventListener('change', (e) => {
+  try { localStorage.setItem('voice-name', e.target.value); } catch (err) { /* ничего */ }
+  say('Так звучит этот голос.', true);
+});
+
 function say(text, force) {
   if (!voice.on && !force) return;
   const synth = window.speechSynthesis;
-  const ru = synth && synth.getVoices().find((v) => (v.lang || '').toLowerCase().startsWith('ru'));
-  if (!synth || !ru) { beep(); return; }   // нет русского голоса - хотя бы сигнал
+  const v = pickedVoice();
+  if (!synth || !v) { beep(); return; }   // нет русского голоса - хотя бы сигнал
+  synth.cancel();                          // новая подсказка важнее недоговорённой
   const u = new SpeechSynthesisUtterance(text);
-  u.voice = ru;
-  u.lang = ru.lang;
-  u.rate = 1.15;
+  u.voice = v;
+  u.lang = v.lang;
+  // нейросетевые голоса и так быстрые, классические - чуть медленнее обычного
+  u.rate = /natural|neural|online/i.test(v.name) ? 1.0 : 0.95;
+  u.pitch = 1.0;
   synth.speak(u);
 }
-// голоса в WebView подгружаются не сразу
-if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = () => {};
+// голоса в WebView подгружаются не сразу - список заполнится, когда придут
+if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = fillVoiceSelect;
+fillVoiceSelect();
 
 function heroName(id) { return (state.byId.get(id) || {}).name || ('#' + id); }
 
