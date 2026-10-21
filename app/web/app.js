@@ -2099,9 +2099,9 @@ setTimeout(() => checkUpdate(0), 6000);
 // голосом - если включено (Web Speech API окна; русского голоса может не
 // быть - тогда короткий сигнал). Ключ - id героя в Dota.
 const THREATS = {
-  33: 'Энигма: Black Hole по площади — не стойте кучей, нужен BKB или прерывание.',
+  33: 'Энигма: Black Hole пробивает BKB — нужен контроль сквозь BKB или сайленс, чтобы сбить ульту, и не стойте кучей.',
   97: 'Магнус: Reverse Polarity — в драке держитесь врозь, полезен Force Staff.',
-  29: 'Тайдхантер: Ravage по площади — расходитесь в драках, полезен BKB.',
+  29: 'Тайдхантер: Ravage по площади — расходитесь в драках.',
   41: 'Войд: Chronosphere — нужен сейв или героев с выходом из хроны.',
   7: 'Эршейкер: Echo Slam — не стойте кучей у крипов и иллюзий.',
   59: 'Хускар: нужен антихил — Spirit Vessel или Eye of Skadi.',
@@ -2148,7 +2148,7 @@ $('#voice-on').addEventListener('change', (e) => {
   try { localStorage.setItem('voice-on', voice.on ? '1' : '0'); } catch (err) { /* ничего */ }
   if (voice.on) say('Голосовые подсказки включены.');
 });
-$('#voice-test').addEventListener('click', () => say('Враг взял Энигму: не стойте кучей, нужен BKB.', true));
+$('#voice-test').addEventListener('click', () => say('Энигма: Black Hole пробивает BKB — нужен контроль сквозь BKB или сайленс.', true));
 
 function beep() {
   try {
