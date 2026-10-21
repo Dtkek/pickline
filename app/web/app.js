@@ -600,6 +600,36 @@ function setMyHero(id, how) {
   loadBuild(how);
 }
 
+// предметы против этого драфта: правила (уклонение -> MKB, лечение -> антихил,
+// невидимость -> сентри), а не статистика; под роль игрока
+async function loadCounters(out, enemies, hero, token) {
+  if (!enemies.length) return;
+  const pos = $('#position').value;
+  const roles = (hero && hero.roles) || [];
+  const role = pos ? (Number(pos) >= 4 ? 'support' : 'core')
+    : (roles.includes('Support') && !roles.includes('Carry') ? 'support' : 'core');
+  try {
+    const c = await api('/api/counters?' + new URLSearchParams({ enemy: enemies.join(','), role }));
+    if (token !== me.buildToken || !c.items.length) return;
+    const box = el('div');
+    box.style.marginTop = '10px';
+    box.appendChild(el('div', 'skills-sub',
+      `Против этого драфта (${role === 'support' ? 'саппорт' : 'кор'}):`));
+    const row = el('div', 'items-row');
+    c.items.forEach((it) => {
+      const card = el('div', 'build-item');
+      card.appendChild(itemIcon(it));
+      card.title = `${it.dname}: ${it.why.join('; ')}`;
+      row.appendChild(card);
+    });
+    box.appendChild(row);
+    c.items.forEach((it) => box.appendChild(el('div', 'alert-line dim', `• ${it.dname} — ${it.why.join('; ')}`)));
+    // над рядами сборки - чтобы было видно сразу
+    const items = out.querySelector('.items');
+    if (items) out.insertBefore(box, items); else out.appendChild(box);
+  } catch (e) { /* без подсказок - не ошибка */ }
+}
+
 async function loadBuild(how, quiet) {
   const out = $('#build-out');
   if (!me.heroId) {
@@ -627,6 +657,7 @@ async function loadBuild(how, quiet) {
     if (token !== me.buildToken) return;
     out.className = '';
     renderBuild(out, b, hero, how);
+    loadCounters(out, enemies, hero, token);
     loadSkills(out, token);
     // сервер отдал снимок или прежнюю копию, а живую сборку считает в фоне -
     // дозапросить, пока не досчитает (но не бесконечно: на битом канале

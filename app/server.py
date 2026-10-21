@@ -222,7 +222,7 @@ CDN = "https://cdn.cloudflare.steamstatic.com"
 
 # Версия показывается в консоли и в шапке страницы: когда что-то идёт не так,
 # первым делом нужно понять, какой код на самом деле запущен.
-VERSION = "2026-10-21.3"
+VERSION = "2026-10-21.4"
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -419,6 +419,59 @@ def tournament_snapshot():
     except (OSError, ValueError):
         _tour_snapshot_cache = {}
     return _tour_snapshot_cache
+
+
+# --- предметы против драфта ----------------------------------------------------
+# Правила «против кого что брать» - не статистика, а здравый смысл драфта:
+# уклонение -> MKB, лечение -> антихил, невидимость -> сентри и Dust. Роль:
+# core - предметы коров, support - саппортов, all - кому угодно.
+# Ключи предметов - как в items_fallback (OpenDota).
+INVISIBLE = {32, 62, 63, 56, 46, 83, 16, 61, 88, 9, 74}
+COUNTER_RULES = {
+    44: [("monkey_king_bar", "core", "уклонение Phantom Assassin")],
+    59: [("spirit_vessel", "support", "антихил против Huskar"), ("skadi", "core", "антихил против Huskar")],
+    36: [("spirit_vessel", "support", "антихил против Necrophos"), ("skadi", "core", "антихил против Necrophos")],
+    54: [("spirit_vessel", "support", "антихил против Lifestealer"), ("skadi", "core", "антихил против Lifestealer")],
+    73: [("spirit_vessel", "support", "антихил против Alchemist")],
+    99: [("silver_edge", "core", "снимает пассивку Bristleback")],
+    12: [("mjollnir", "core", "урон по площади по иллюзиям Phantom Lancer")],
+    89: [("mjollnir", "core", "урон по площади по иллюзиям Naga Siren")],
+    109: [("mjollnir", "core", "урон по площади по иллюзиям Terrorblade")],
+    82: [("mjollnir", "core", "урон по площади против Meepo")],
+    70: [("ghost", "all", "от физического урона Ursa"), ("cyclone", "support", "сбить Ursa")],
+    95: [("abyssal_blade", "core", "контроль сквозь BKB против Troll Warlord")],
+    17: [("orchid", "core", "молчание против Storm Spirit")],
+    106: [("orchid", "core", "молчание против Ember Spirit")],
+    126: [("orchid", "core", "молчание против Void Spirit")],
+    39: [("orchid", "core", "молчание против Queen of Pain")],
+    13: [("orchid", "core", "молчание против Puck")],
+}
+
+
+def counter_items(enemies, role="core"):
+    """Предметы против драфта врага под роль игрока: [{key, dname, img, cost, why: [..]}]."""
+    from sources import opendota as od
+    items = od._load_items() if hasattr(od, "_load_items") else {}
+    want = {}
+    def add(key, why):
+        want.setdefault(key, []).append(why)
+    for e in enemies:
+        for key, who, why in COUNTER_RULES.get(e, []):
+            if who in ("all", role):
+                add(key, why)
+    invis = [e for e in enemies if e in INVISIBLE]
+    if invis:
+        add("dust", "невидимые герои у врага")
+        add("ward_sentry", "невидимые герои у врага")
+        if len(invis) >= 2:
+            add("gem", f"у врага {len(invis)} невидимых героя")
+    out = []
+    for key, why in want.items():
+        it = items.get(key) or {}
+        out.append({"key": key, "dname": it.get("dname") or key,
+                    "img": CDN + it["img"] if it.get("img") else None,
+                    "cost": it.get("cost"), "why": why})
+    return {"items": out, "role": role}
 
 
 def reset_snapshot_caches():
@@ -1401,6 +1454,10 @@ class Handler(BaseHTTPRequestHandler):
                 tier = (q.get("tier") or ["top"])[0]
                 force = (q.get("force") or ["0"])[0] == "1"
                 return self._json(hero_build_fast(src, int(hero), months, enemies, tier, force))
+            if url.path == "/api/counters":
+                enemies = [int(x) for x in (q.get("enemy") or [""])[0].split(",") if x.strip()]
+                role = (q.get("role") or ["core"])[0]
+                return self._json(counter_items(enemies, role))
             if url.path == "/api/wards":
                 months = int((q.get("months") or ["3"])[0])
                 tier = (q.get("tier") or ["top"])[0]
