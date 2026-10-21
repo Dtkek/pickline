@@ -222,7 +222,7 @@ CDN = "https://cdn.cloudflare.steamstatic.com"
 
 # Версия показывается в консоли и в шапке страницы: когда что-то идёт не так,
 # первым делом нужно понять, какой код на самом деле запущен.
-VERSION = "2026-10-21.4"
+VERSION = "2026-10-21.5"
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -448,13 +448,29 @@ COUNTER_RULES = {
 }
 
 
+# ранние предметы против линии: часто кастующие способности -> Magic Wand,
+# магический прокаст -> Infused Raindrops
+SPELL_SPAMMERS = {99: "Bristleback", 65: "Batrider", 22: "Zeus", 101: "Skywrath Mage", 52: "Leshrac",
+                  98: "Timbersaw", 17: "Storm Spirit", 43: "Death Prophet", 39: "Queen of Pain"}
+MAGIC_BURST = {25: "Lina", 26: "Lion", 22: "Zeus", 101: "Skywrath Mage", 34: "Tinker",
+               39: "Queen of Pain", 52: "Leshrac"}
+
+
 def counter_items(enemies, role="core"):
     """Предметы против драфта врага под роль игрока: [{key, dname, img, cost, why: [..]}]."""
     from sources import opendota as od
     items = od._load_items() if hasattr(od, "_load_items") else {}
-    want = {}
+    want, early = {}, set()
     def add(key, why):
         want.setdefault(key, []).append(why)
+    spam = [SPELL_SPAMMERS[e] for e in enemies if e in SPELL_SPAMMERS]
+    if spam:
+        add("magic_wand", "много кастуют: " + ", ".join(spam))
+        early.add("magic_wand")
+    burst = [MAGIC_BURST[e] for e in enemies if e in MAGIC_BURST]
+    if burst and role == "core":
+        add("infused_raindrop", "магический прокаст: " + ", ".join(burst))
+        early.add("infused_raindrop")
     for e in enemies:
         for key, who, why in COUNTER_RULES.get(e, []):
             if who in ("all", role):
@@ -470,7 +486,8 @@ def counter_items(enemies, role="core"):
         it = items.get(key) or {}
         out.append({"key": key, "dname": it.get("dname") or key,
                     "img": CDN + it["img"] if it.get("img") else None,
-                    "cost": it.get("cost"), "why": why})
+                    "cost": it.get("cost"), "why": why, "early": key in early})
+    out.sort(key=lambda x: not x["early"])          # ранние - первыми
     return {"items": out, "role": role}
 
 

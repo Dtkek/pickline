@@ -460,6 +460,7 @@ function renderRecommendations(out, data) {
       <th class="num">Винрейт</th><th class="num">Выборка</th>
       <th>Против кого</th></tr></thead>`;
   const tb = el('tbody');
+  const gaps = teamGaps();
 
   rows.forEach((r, i) => {
     const tr = el('tr');
@@ -476,6 +477,9 @@ function renderRecommendations(out, data) {
     const nameBox = el('div');
     nameBox.appendChild(el('div', '', r.name));
     nameBox.appendChild(el('div', 'dim', r.roles.slice(0, 3).join(', ')));
+    // закрывает дыру в пике своей команды - отметить
+    const fills = gaps.filter(([role]) => r.roles.includes(role)).map(([, short]) => short);
+    if (fills.length) nameBox.appendChild(el('div', 'pos', 'закрывает: ' + fills.join(', ')));
     cell.appendChild(nameBox);
     tdHero.appendChild(cell);
     tr.appendChild(tdHero);
@@ -623,7 +627,8 @@ async function loadCounters(out, enemies, hero, token) {
       row.appendChild(card);
     });
     box.appendChild(row);
-    c.items.forEach((it) => box.appendChild(el('div', 'alert-line dim', `• ${it.dname} — ${it.why.join('; ')}`)));
+    c.items.forEach((it) => box.appendChild(el('div', 'alert-line dim',
+      `• ${it.dname}${it.early ? ' (на линию, рано)' : ''} — ${it.why.join('; ')}`)));
     // над рядами сборки - чтобы было видно сразу
     const items = out.querySelector('.items');
     if (items) out.insertBefore(box, items); else out.appendChild(box);
@@ -2210,10 +2215,25 @@ if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = () => {};
 
 function heroName(id) { return (state.byId.get(id) || {}).name || ('#' + id); }
 
+// баланс своей команды по ролям героев (OpenDota): чего не хватает пику.
+// Смотрим, когда союзников уже трое: раньше «нет контроля» - просто начало драфта
+const TEAM_NEEDS = [
+  ['Disabler', 'контроль', 'нет героев с контролем (станы, сайленсы) — драки будет сложно начинать и ловить врага'],
+  ['Initiator', 'инициация', 'нет инициатора — некому начинать драки'],
+  ['Durable', 'танк', 'нет живучих героев — в драках будет нечем держать урон'],
+  ['Pusher', 'пуш', 'нет героев для пуша — сносить вышки будет долго'],
+];
+function teamGaps() {
+  const ally = state.draft.ally.map((id) => state.byId.get(id)).filter(Boolean);
+  if (ally.length < 3) return [];
+  return TEAM_NEEDS.filter(([role]) => !ally.some((h) => (h.roles || []).includes(role)));
+}
+
 function updateDraftAlerts() {
   const box = $('#draft-alerts');
   const enemy = state.draft.enemy;
   const lines = [];
+  teamGaps().forEach(([, , text]) => lines.push('Ваша команда: ' + text + '.'));
   enemy.forEach((id) => {
     if (THREATS[id]) lines.push(THREATS[id]);
     if (INVIS[id]) lines.push(`${heroName(id)} — невидимость ${INVIS[id].when}: нужны сентри и Dust (места — вкладка «Варды»).`);
