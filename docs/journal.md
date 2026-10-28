@@ -384,3 +384,31 @@ Clinkz, TA, Treant, SK, Brood, Mirana, Invoker) - когда нужны сент
 ПК - неизвестно.
 
 **Следующий шаг:** на ПК в драфте: «Проверить звук», лог «GSI: блок draft».
+
+
+## 2026-10-28 · mac · голосовой тренер (Gemini Live)
+
+**Сделано:** страница /coach (web/coach.html + coach.js), кнопка в шапке
+открывает её в системном браузере (POST /api/coach/open). Браузер сам держит
+WebSocket к Gemini Live (gemini-3.8-live, по docs ai.google.dev 2026-10-28):
+микрофон AudioWorklet -> PCM 16 кГц, ответ PCM через WebAudio, перебивание
+по interrupted, расшифровки, сжатие контекста + sessionResumption + GoAway.
+Инструменты: get_game_state, look_at_screen (/api/coach/screen, один JPEG),
+get_hero_build, counter_items, googleSearch. Ползунки характера ->
+systemInstruction. GSI: конфиг просит abilities и items, gsi.check
+проверяет поля; сервер собирает сводку матча и события (смерть, убийство,
+уровень, мало HP, руны) -> /api/coach/events. Ключ - gemini_key.txt рядом
+с exe (.gitignore) или GEMINI_API_KEY. tools/coach_sim.py проигрывает матч
+OpenDota как поток GSI. Версия 2026-10-28.1.
+
+**Проверено на mac:** coach_sim на матче 9066084051 (Dazzle, 20 минут):
+события и сводка верные (3 смерти, 2 убийства, уровни, руны); /coach и
+coach.js отдаются; /api/coach/screen даёт JPEG; синтаксис JS (esprima).
+
+**Не проверено:** сам разговор с Gemini Live (нет ключа): формат setup
+(responseModalities в generationConfig - по справочнику API, в примере
+get-started - на верхнем уровне), голос, микрофон в браузере. Время рун
+(силовые с 6:00 каждые 2 мин, мудрости каждые 7 мин) - по памяти.
+
+**Следующий шаг:** с ключом прогнать протокол (текстовый вопрос -> аудио,
+вызов инструмента), потом на ПК в матче.

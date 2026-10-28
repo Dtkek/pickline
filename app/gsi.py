@@ -51,6 +51,100 @@ _state = {
 }
 _draft_block_logged = False
 
+# --- живой матч для голосового тренера -------------------------------------
+# Сводка последнего сообщения игры и события (смерть, убийство, уровень, мало
+# здоровья, скоро руны). События - очередь с номерами: страница тренера
+# забирает новые по /api/coach/events?since=N.
+_live = {}
+_events = []          # [{"id", "at", "text", "important"}]
+_event_seq = 0
+_prev = {}            # прошлые значения для сравнения: deaths, kills, level, low_hp, clock
+EVENTS_KEEP = 200
+
+
+def _event(text, important=False):
+    global _event_seq
+    _event_seq += 1
+    _events.append({"id": _event_seq, "at": time.time(), "text": text, "important": important})
+    del _events[:-EVENTS_KEEP]
+
+
+def _fmt_clock(sec):
+    sec = int(sec or 0)
+    sign = "-" if sec < 0 else ""
+    sec = abs(sec)
+    return f"{sign}{sec // 60}:{sec % 60:02d}"
+
+
+def _update_live(payload):
+    """Сводка матча + события по разнице с прошлым сообщением (под _lock)."""
+    m = payload.get("map") or {}
+    p = payload.get("player") or {}
+    h = payload.get("hero") or {}
+    items = payload.get("items") or {}
+    abil = payload.get("abilities") or {}
+    if m.get("game_state") != "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS" and not h.get("level"):
+        return
+    inv = [(items.get(f"slot{i}") or {}).get("name") for i in range(6)]
+    inv = [x.replace("item_", "") for x in inv if x and x != "empty"]
+    skills = []
+    for k in sorted(abil):
+        a = abil[k] or {}
+        if a.get("name") and not a["name"].startswith("special_bonus"):
+            skills.append({"name": a["name"], "level": a.get("level"), "ultimate": a.get("ultimate"),
+                           "cooldown": a.get("cooldown"), "can_cast": a.get("can_cast")})
+    live = {
+        "clock": m.get("clock_time"), "clock_text": _fmt_clock(m.get("clock_time")),
+        "daytime": m.get("daytime"), "game_state": m.get("game_state"),
+        "kills": p.get("kills"), "deaths": p.get("deaths"), "assists": p.get("assists"),
+        "last_hits": p.get("last_hits"), "denies": p.get("denies"),
+        "gold": p.get("gold"), "gpm": p.get("gpm"), "xpm": p.get("xpm"),
+        "hero": h.get("name"), "level": h.get("level"), "alive": h.get("alive"),
+        "health": h.get("health"), "max_health": h.get("max_health"),
+        "mana": h.get("mana"), "max_mana": h.get("max_mana"),
+        "respawn_seconds": h.get("respawn_seconds"), "buyback_cost": h.get("buyback_cost"),
+        "items": inv, "abilities": skills,
+    }
+    _live.clear()
+    _live.update(live)
+
+    # события - только по разнице с прошлым сообщением
+    if _prev.get("deaths") is not None and (live["deaths"] or 0) > _prev["deaths"]:
+        _event(f"Игрок умер (смертей: {live['deaths']}). Воскрешение через "
+               f"{live['respawn_seconds'] or '?'} с.", important=True)
+    if _prev.get("kills") is not None and (live["kills"] or 0) > _prev["kills"]:
+        _event(f"Игрок сделал убийство (всего {live['kills']}).", important=True)
+    if _prev.get("level") is not None and (live["level"] or 0) > _prev["level"]:
+        lvl = live["level"]
+        _event(f"Новый уровень: {lvl}." + (" Открылась ульта." if lvl == 6 else ""), important=lvl in (6, 12, 18))
+    hp = (live["health"] or 0) / max(1, live["max_health"] or 1)
+    if live["alive"] and hp < 0.25 and not _prev.get("low_hp"):
+        _event(f"Мало здоровья: {live['health']} из {live['max_health']}.", important=True)
+        _prev["low_hp"] = True
+    elif hp > 0.5:
+        _prev["low_hp"] = False
+    # руны (за 15 с): силовые - с 6:00 каждые 2 мин, мудрости - каждые 7 мин
+    clk = live["clock"]
+    last = _prev.get("clock")
+    if isinstance(clk, int) and isinstance(last, int) and clk > last:
+        for t in range(last + 1, clk + 1):
+            nxt = t + 15
+            if nxt >= 360 and nxt % 120 == 0:
+                _event(f"Через 15 секунд силовые руны ({_fmt_clock(nxt)}).")
+            if nxt >= 420 and nxt % 420 == 0:
+                _event(f"Через 15 секунд руны мудрости ({_fmt_clock(nxt)}).", important=True)
+    _prev.update(deaths=live["deaths"], kills=live["kills"], level=live["level"], clock=clk)
+
+
+def live_state():
+    with _lock:
+        return dict(_live)
+
+
+def events_since(since):
+    with _lock:
+        return [e for e in _events if e["id"] > since], _event_seq
+
 # что игра присылает в блоке player на стадии выбора героя: пишется в лог
 # один раз за запуск, чтобы узнать, есть ли там номер слота
 _draft_player_logged = False
@@ -72,6 +166,8 @@ def config_text(port, token="drafthelper"):
         "player"        "1"
         "hero"          "1"
         "draft"         "1"
+        "abilities"     "1"
+        "items"         "1"
     }}
     "auth"
     {{
@@ -113,6 +209,7 @@ def handle(payload):
             import sys
             sys.stderr.write("  GSI: блок player на стадии выбора героя: "
                              + json.dumps(player, ensure_ascii=False)[:600] + "\n")
+        _update_live(payload)
         # таймер выбора из блока draft (если игра его присылает)
         if isinstance(draft, dict) and draft:
             if not _draft_block_logged:
@@ -211,7 +308,11 @@ def check(port):
             result["config_present"] = True
             try:
                 with open(path, encoding="utf-8", errors="ignore") as f:
-                    result["config_port_ok"] = f":{port}/gsi" in f.read()
+                    text = f.read()
+                result["config_port_ok"] = f":{port}/gsi" in text
+                # голосовому тренеру нужны способности и предметы: конфиг из
+                # старой версии их не просит - его надо переустановить
+                result["config_fields_ok"] = '"abilities"' in text and '"items"' in text
             except OSError:
                 pass
     result.update(state())

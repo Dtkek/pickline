@@ -52,6 +52,8 @@ WEBVIEW_DIR = os.path.join(CACHE_DIR, "webview")
 
 LOG_PATH = os.path.join(EXE_DIR, "pickline.log")
 TOKEN_FILE = os.path.join(EXE_DIR, "stratz_token.txt")
+# ключ Gemini API для голосового тренера (aistudio.google.com) - рядом с exe, в git не попадает
+GEMINI_KEY_FILE = os.path.join(EXE_DIR, "gemini_key.txt")
 
 
 def data_file(name):

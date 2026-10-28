@@ -222,7 +222,7 @@ CDN = "https://cdn.cloudflare.steamstatic.com"
 
 # Версия показывается в консоли и в шапке страницы: когда что-то идёт не так,
 # первым делом нужно понять, какой код на самом деле запущен.
-VERSION = "2026-10-21.6"
+VERSION = "2026-10-28.1"
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -419,6 +419,62 @@ def tournament_snapshot():
     except (OSError, ValueError):
         _tour_snapshot_cache = {}
     return _tour_snapshot_cache
+
+
+# --- голосовой тренер ------------------------------------------------------------
+def coach_key():
+    """Ключ Gemini API: переменная GEMINI_API_KEY или gemini_key.txt рядом с exe."""
+    key = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if key:
+        return key
+    try:
+        with open(paths.GEMINI_KEY_FILE, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def coach_state(source):
+    """Сводка матча для модели: живые данные GSI + герой, предметы, способности."""
+    s = gsi.state()
+    live = gsi.live_state()
+    names = {h.get("name"): h.get("localized_name") for h in source.hero_stats()}
+    hero = names.get(live.get("hero") or s.get("hero_name")) or live.get("hero") or s.get("hero_name")
+    if not live:
+        return {"connected": s.get("alive"), "game_state": s.get("game_state"), "hero": hero,
+                "summary": "Матч не идёт или игра не присылает данные (нужно «Подключить игру» "
+                           "и перезапустить Dota после обновления конфига)."}
+    hp = f"{live.get('health')}/{live.get('max_health')}"
+    mp = f"{live.get('mana')}/{live.get('max_mana')}"
+    ab = ", ".join(f"{a['name'].split('_', 1)[-1]} ур.{a['level']}"
+                   + (" (откат)" if a.get("cooldown") else "") for a in live.get("abilities", []))
+    summary = (f"Время {live.get('clock_text')}, {'день' if live.get('daytime') else 'ночь'}. "
+               f"Герой {hero}, уровень {live.get('level')}, "
+               f"{'жив' if live.get('alive') else 'мёртв, воскрешение через ' + str(live.get('respawn_seconds')) + ' с'}. "
+               f"Здоровье {hp}, мана {mp}. KDA {live.get('kills')}/{live.get('deaths')}/{live.get('assists')}, "
+               f"добито {live.get('last_hits')}/{live.get('denies')}, золото {live.get('gold')}, GPM {live.get('gpm')}. "
+               f"Предметы: {', '.join(live.get('items') or []) or 'нет'}. Способности: {ab or '—'}.")
+    return {"connected": s.get("alive"), "team": s.get("team"), "hero": hero, "summary": summary, "live": live}
+
+
+def coach_screen():
+    """Один снимок экрана для модели (JPEG до 1280 px, base64) - только по запросу."""
+    import base64
+    if not vision.AVAILABLE:
+        return {"error": "снимок экрана недоступен: " + vision.requirements_hint()}
+    import cv2
+    from vision import capture
+    frame = capture.grab(1)
+    h, w = frame.shape[:2]
+    k = min(1.0, 1280 / w)
+    if k < 1:
+        frame = cv2.resize(frame, (int(w * k), int(h * k)), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    if not ok:
+        return {"error": "не удалось сжать кадр"}
+    dark = float(frame.mean()) < 6
+    return {"mime": "image/jpeg", "data": base64.b64encode(buf.tobytes()).decode(),
+            "note": "кадр почти чёрный - Dota, скорее всего, в эксклюзивном полноэкранном режиме" if dark else None}
 
 
 # --- предметы против драфта ----------------------------------------------------
@@ -1371,6 +1427,21 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path in ("/", "/index.html"):
                 return self._file(os.path.join(WEB_DIR, "index.html"))
+            if url.path in ("/coach", "/coach.html"):
+                return self._file(os.path.join(WEB_DIR, "coach.html"))
+
+            # --- голосовой тренер (страница /coach в системном браузере) ---
+            if url.path == "/api/coach/key":
+                key = coach_key()
+                return self._json({"has": bool(key), "key": key})
+            if url.path == "/api/coach/state":
+                return self._json(coach_state(src))
+            if url.path == "/api/coach/events":
+                since = int((q.get("since") or ["0"])[0])
+                evs, last = gsi.events_since(since)
+                return self._json({"events": evs, "last": last})
+            if url.path == "/api/coach/screen":
+                return self._json(coach_screen())
             if url.path.startswith("/static/"):
                 name = os.path.basename(url.path)
                 return self._file(os.path.join(WEB_DIR, name))
@@ -1570,6 +1641,18 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/gsi/install":
                 path, msg = gsi.install(self.server.server_address[1])
                 return self._json({"path": path, "message": msg})
+
+            if url.path == "/api/coach/key":
+                key = (data.get("key") or "").strip()
+                with open(paths.GEMINI_KEY_FILE, "w", encoding="utf-8") as f:
+                    f.write(key)
+                return self._json({"has": bool(key)})
+            if url.path == "/api/coach/open":
+                # в системном браузере: микрофон и подавление эха там надёжнее,
+                # чем во встроенном окне pywebview
+                import webbrowser
+                webbrowser.open(f"http://127.0.0.1:{self.server.server_address[1]}/coach")
+                return self._json({"ok": True})
 
             if url.path == "/api/recommend":
                 enemy = data.get("enemy") or []

@@ -1021,6 +1021,9 @@ $('#gsi-check').addEventListener('click', async () => {
         steps.push([c.config_port_ok,
           c.config_port_ok ? 'в конфиге правильный адрес и порт'
             : 'в конфиге другой порт — нажмите «Подключить игру» ещё раз']);
+        steps.push([!!c.config_fields_ok,
+          c.config_fields_ok ? 'конфиг свежий: игра присылает предметы и способности (нужно голосовому тренеру)'
+            : 'конфиг старый — нажмите «Подключить игру» ещё раз и перезапустите Dota (для голосового тренера)']);
       }
     }
     steps.push([c.received > 0,
@@ -2128,6 +2131,13 @@ async function checkUpdate(attempt) {
   } catch (e) { /* без сети - без обновлений, это не ошибка */ }
 }
 setTimeout(() => checkUpdate(0), 6000);
+
+// голосовой тренер - отдельная страница в системном браузере (микрофон там надёжнее)
+$('#coach-open').addEventListener('click', (e) => {
+  e.stopPropagation();
+  api('/api/coach/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+    .catch(() => window.open('/coach', '_blank'));
+});
 
 // ------------------------------------------------- подсказки по драфту врага
 // Короткий совет, когда враг берёт героя, против которого нужно что-то
